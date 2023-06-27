@@ -1,0 +1,14 @@
+{
+    "DiscordBotToken": "your_bot_token_here",
+    "ServerIP": "your_server_ip_here",
+    "PortNumber": 8080,
+    "SteamAPIKey": "",
+    "SteamAvatarRefreshTime": 30,
+    "LogConnections": false,
+    "ChannelID": "",
+    "GuildID": "",
+    "Webhook": {
+        "ID": "",
+        "Token": ""
+    }
+}
