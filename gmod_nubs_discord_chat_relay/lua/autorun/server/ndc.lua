@@ -195,6 +195,8 @@ hook.Add("player_disconnect", "nsz_comms_disconnect", function(ply)
         elseif websocket ~= nil and websocket:IsActive() then 
             websocket:Send(util.TableToJSON(packet))
         end
+
+        connectingPlayers[ply.networkid] = nil -- This is already done in PlayerInitialSpawn, however not if they disconnect before they spawn. This ensures they get removed from connecting.
     else 
         MsgN("Discord communication inactive - missing required mod Gmod Websockets.")
     end
