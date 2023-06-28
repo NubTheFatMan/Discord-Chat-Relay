@@ -61,6 +61,9 @@ end
 -- In case connection to the websocket server has been lost, we are going to resort to a queue to send any new message when reconnected.
 local queue = {} 
 
+local connectingPlayers = {}
+local playerJoinTimestamps = {}
+
 local websocket
 function connectToWebsocket()
     if WS ~= nil then 
@@ -79,11 +82,29 @@ function connectToWebsocket()
         end)
 
         websocket:on("message", function(data)
-            local message = util.JSONToTable(data)
+            local packet = util.JSONToTable(data)
 
-            local fromCol = hexToCol(message.color)
+            if packet.requestStatus then 
+                local connecting = {}
+                for id, data in pairs(connectingPlayers) do 
+                    table.insert(connecting, data)
+                end
 
-            notify(Color(88, 101, 242), "(Discord) ", fromCol, message.author, Color(255, 255, 255), ": " .. message.content)
+                local spawnedPlayers = {}
+                for i, ply in ipairs(player.GetAll()) do 
+                    table.insert(spawnedPlayers, {ply:Nick(), ply:SteamID(), playerJoinTimestamps[ply:SteamID()] or 0})
+                end
+
+                local response = {}
+                response.type = "status"
+                response.map = game.GetMap()
+                response.connectingPlayers = connecting
+                response.players = spawnedPlayers
+
+                websocket:Send(util.TableToJSON(response))
+            else 
+                notify(Color(88, 101, 242), "(Discord) ", hexToCol(packet.color), packet.author, Color(255, 255, 255), ": " .. packet.content)
+            end
         end)
 
         websocket:on("close", function()
@@ -129,6 +150,9 @@ hook.Add("player_connect", "discord_comms_join", function(ply)
         elseif websocket ~= nil and websocket:IsActive() then 
             websocket:Send(util.TableToJSON(packet))
         end
+
+        connectingPlayers[ply.networkid] = {ply.name, ply.networkid, os.time()}
+        playerJoinTimestamps[ply.networkid] = os.time()
     else 
         MsgN("Discord communication inactive - missing required mod Gmod Websockets.")
     end
@@ -148,6 +172,8 @@ hook.Add("PlayerInitialSpawn", "discord_comms_spawn", function(ply)
         elseif websocket ~= nil and websocket:IsActive() then 
             websocket:Send(util.TableToJSON(packet))
         end
+
+        connectingPlayers[ply:SteamID()] = nil
     else 
         MsgN("Discord communication inactive - missing required mod Gmod Websockets.")
     end

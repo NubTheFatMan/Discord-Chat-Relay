@@ -85,6 +85,7 @@ async function getSteamAvatar(id) {
 // I use a queueing system to stack up messages to be sent through the webhook. I wait for the previous webhook to send just in case they try to send out of order.
 let queue = [];
 let runningQueue = false;
+let replyInteraction;
 async function sendQueue() {
     if (!webhook || runningQueue)
         return; 
@@ -130,6 +131,70 @@ async function sendQueue() {
 
                 await webhook.send(options).catch(console.error);
             } break;
+
+            case "status": {
+                if (!replyInteraction) return;
+
+                let [name, steamid, joined, status] = ['Name', 'Steam ID', 'Time Connected', "Status"];
+
+                let maxNameLength    = name.length;
+                let maxSteamidLength = steamid.length;
+                let maxJoinTimestamp = joined.length;
+                let maxStatus        = status.length
+
+                let rows = [];
+
+                let now = Math.round(Date.now()/1000);
+                for (let i = 0; i < packet.connectingPlayers.length; i++) {
+                    let data = packet.connectingPlayers[i];
+
+                    let timeOnServer = now - data[2];
+                    let hours = Math.floor(timeOnServer / 60 / 60);
+                    let minutes = Math.floor(timeOnServer / 60) % 60;
+                    let seconds = timeOnServer % 60;
+
+                    let timeString = `${hours}:${minutes}:${seconds}`;
+
+                    let currentStatus = "Connecting";
+                    maxNameLength    = Math.max(maxNameLength, data[0].length);
+                    maxSteamidLength = Math.max(maxSteamidLength, data[1].length);
+                    maxJoinTimestamp = Math.max(maxJoinTimestamp, timeString.length);
+                    maxStatus        = Math.max(maxStatus, currentStatus.length);
+
+                    rows.push([data[0], data[1], timeString, currentStatus]);
+                }
+
+                for (let i = 0; i < packet.players.length; i++) {
+                    let data = packet.players[i];
+
+                    let timeOnServer = now - data[2];
+                    let hours = Math.floor(timeOnServer / 60 / 60);
+                    let minutes = Math.floor(timeOnServer / 60) % 60;
+                    let seconds = timeOnServer % 60;
+
+                    let timeString = `${hours}:${minutes}:${seconds}`;
+
+                    let currentStatus = "In Server";
+                    maxNameLength    = Math.max(maxNameLength, data[0].length);
+                    maxSteamidLength = Math.max(maxSteamidLength, data[1].length);
+                    maxJoinTimestamp = Math.max(maxJoinTimestamp, timeString.length);
+                    maxStatus        = Math.max(maxStatus, currentStatus.length);
+
+                    rows.push([data[0], data[1], timeString, currentStatus]);
+                }
+
+                let linesOfText = [
+                    `| ${name + ' '.repeat(maxNameLength - name.length)} | ${steamid + ' '.repeat(maxSteamidLength - steamid.length)} | ${joined + ' '.repeat(maxJoinTimestamp - joined.length)} | ${status + ' '.repeat(maxStatus - status.length)} |`,
+                    `|${'-'.repeat(maxNameLength + 2)}|${'-'.repeat(maxSteamidLength + 2)}|${'-'.repeat(maxJoinTimestamp + 2)}|${'-'.repeat(maxStatus + 2)}|`
+                ];
+
+                for (let i = 0; i < rows.length; i++) {
+                    let row = rows[i];
+                    linesOfText.push(`| ${row[0] + ' '.repeat(maxNameLength - row[0].length)} | ${row[1] + ' '.repeat(maxSteamidLength - row[1].length)} | ${row[2] + ' '.repeat(maxJoinTimestamp - row[2].length)} | ${row[3] + ' '.repeat(maxStatus - row[3].length)} |`);
+                }
+
+                replyInteraction.editReply(`Playing on map ${packet.map}\`\`\`\n${linesOfText.join('\n')}\`\`\``).then(() => replyInteraction = undefined);
+            }
         }
     }
 
@@ -156,14 +221,8 @@ function getWebhook(json) {
                     channel: config.ChannelID,
                     name: "Dickord Communication Relay"
                 })
-                    .then(wh => {assignWebhook(wh); saveConfig()})
+                    .then(wh => {assignWebhook(wh); saveConfig();})
                     .catch(console.error);
-                // let channel = guild.channels.resolve(config.ChannelID);
-                // if (channel) {
-                //     channel.createWebhook({name: "Discord Communication Relay", reason: "Opening communication with a Garry's Mod server"})
-                //         .then(wh => {assignWebhook(wh); saveConfig();})
-                //         .catch(console.error);
-                // }
             }
         });
 
@@ -240,7 +299,7 @@ client.on('messageCreate', message => {
         saveConfig();
         message.react('✅');
     } else { 
-        if (message.channel.id === config.ChannelID) {
+        if (message.channel.id === config.ChannelID && !message.system) {
             if (relaySocket) {
                 if (relaySocket.readyState == 1) { // 1 means open, we can communicate to the server
                     let data = {};
@@ -256,11 +315,31 @@ client.on('messageCreate', message => {
     }
 });
 
+client.on('interactionCreate', interaction => {
+    if (interaction.isCommand() && interaction.commandName === "status") {
+        if (relaySocket?.readyState !== 1) 
+            return interaction.reply('Server is not currently connected to my websocket. Unable to retrieve status.').catch(console.error);
+
+        interaction.reply('Requesting server status...').then(() => {
+            if (relaySocket?.readyState !== 1) return;
+
+            replyInteraction = interaction;
+
+            relaySocket.send(Buffer.from(JSON.stringify({requestStatus: true})));
+        }).catch(console.error);
+    }
+});
+
 client.on('ready', () => {
     console.log("Bot initialized");
 
     // Get a webhook object
     getWebhook();
+
+    client.application.commands.set([{
+        name: "status",
+        description: "View how many players are on the server along with the map."
+    }]).catch(console.error)
 });
 
 client.login(config.DiscordBotToken);
