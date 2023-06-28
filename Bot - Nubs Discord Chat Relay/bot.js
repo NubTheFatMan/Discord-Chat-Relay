@@ -91,23 +91,46 @@ async function sendQueue() {
 
     runningQueue = true;
 
-    let i = 0;
-    while (i < queue.length) {
+    for (let i = 0; i < queue.length; i++) {
         let packet = queue[i];
-        if (packet.content.length > 0) {
-            let opts = {
-                content: packet.content,
-                username: `(Gmod) ${packet.from}`
-            }
-            
-            await getSteamAvatar(packet.fromSteamID);
-            if (avatarCache[packet.fromSteamID]) 
-                opts.avatarURL = avatarCache[packet.fromSteamID].avatar;
-            
-            await webhook.send(opts).catch(console.error);
-            // console.log(opts)
+        switch (packet.type) {
+            case "message": {
+                if (packet.content.length > 0) {
+                    let opts = {
+                        content: packet.content,
+                        username: `(Gmod) ${packet.from}`
+                    }
+                    
+                    await getSteamAvatar(packet.fromSteamID);
+                    if (avatarCache[packet.fromSteamID]) 
+                        opts.avatarURL = avatarCache[packet.fromSteamID].avatar;
+                    
+                    await webhook.send(opts).catch(console.error);
+                }
+            } break;
+
+            case "join/leave": {
+                let options = {
+                    username: "Gmod Player Connected"
+                }
+                // 1 = join, 2 = spawn, 3 = leave
+                switch (packet.messagetype) {
+                    case 1: {
+                        options.content = `${packet.username} (${packet.usersteamid}) has connected to the server.`;
+                    } break;
+
+                    case 2: {
+                        options.content = `${packet.username} (${packet.usersteamid}) has spawned into the server.`
+                    } break;
+
+                    case 3: {
+                        options.content = `${packet.username} (${packet.usersteamid}) has left the server (${packet.reason}).`
+                    } break;
+                }
+
+                await webhook.send(options).catch(console.error);
+            } break;
         }
-        i++;
     }
 
     // Made it to the end of the queue, clear it

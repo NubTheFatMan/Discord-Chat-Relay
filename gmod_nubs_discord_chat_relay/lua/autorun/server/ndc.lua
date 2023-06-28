@@ -98,9 +98,70 @@ end
 hook.Add("PlayerSay", "nubs_discord_communicator", function(ply, message)
     if WS ~= nil then 
         local packet = {}
+        packet.type = "message"
         packet.from = ply:Nick()
         packet.fromSteamID = ply:SteamID64()
         packet.content = message
+
+        if websocket == nil or (websocket ~= nil and not websocket:IsActive()) then 
+            connectToWebsocket()
+            table.insert(queue, packet)
+        elseif websocket ~= nil and websocket:IsActive() then 
+            websocket:Send(util.TableToJSON(packet))
+        end
+    else 
+        MsgN("Discord communication inactive - missing required mod Gmod Websockets.")
+    end
+end)
+
+gameevent.Listen("player_connect")
+hook.Add("player_connect", "discord_comms_join", function(ply)
+    if WS ~= nil then 
+        local packet = {}
+        packet.type = "join/leave"
+        packet.messagetype = 1 -- 1 = join, 2 = first spawn, 3 = leave
+        packet.username = ply.name
+        packet.usersteamid = ply.networkid
+
+        if websocket == nil or (websocket ~= nil and not websocket:IsActive()) then 
+            connectToWebsocket()
+            table.insert(queue, packet)
+        elseif websocket ~= nil and websocket:IsActive() then 
+            websocket:Send(util.TableToJSON(packet))
+        end
+    else 
+        MsgN("Discord communication inactive - missing required mod Gmod Websockets.")
+    end
+end)
+
+hook.Add("PlayerInitialSpawn", "discord_comms_spawn", function(ply)
+    if WS ~= nil then 
+        local packet = {}
+        packet.type = "join/leave"
+        packet.messagetype = 2 -- 1 = join, 2 = first spawn, 3 = leave
+        packet.username = ply:Nick()
+        packet.usersteamid = ply:SteamID()
+
+        if websocket == nil or (websocket ~= nil and not websocket:IsActive()) then 
+            connectToWebsocket()
+            table.insert(queue, packet)
+        elseif websocket ~= nil and websocket:IsActive() then 
+            websocket:Send(util.TableToJSON(packet))
+        end
+    else 
+        MsgN("Discord communication inactive - missing required mod Gmod Websockets.")
+    end
+end)
+
+gameevent.Listen("player_disconnect")
+hook.Add("player_disconnect", "nsz_comms_disconnect", function(ply)
+    if WS ~= nil then 
+        local packet = {}
+        packet.type = "join/leave"
+        packet.messagetype = 3 -- 1 = join, 2 = first spawn, 3 = leave
+        packet.username = ply.name
+        packet.usersteamid = ply.networkid
+        packet.reason = ply.reason
 
         if websocket == nil or (websocket ~= nil and not websocket:IsActive()) then 
             connectToWebsocket()
