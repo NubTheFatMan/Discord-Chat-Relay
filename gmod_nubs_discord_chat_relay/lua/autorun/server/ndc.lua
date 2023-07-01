@@ -1,12 +1,7 @@
 -- Not much to the server end. More stuff is involved in setting up the bot.
 
--- Config:
-         
-local BotIP = "localhost" -- The IP of the bot hosting the websocket server we use to communicate with Discord.  
-local PortNumber = 8080   -- Which port the websocket is on   
-
--------------------------------
--- No more config after this --
+ndc = ndc or {}
+include("ndc_config.lua")
 
 
 -- Function to notify players when a discord message is received
@@ -59,40 +54,40 @@ end
 
 
 -- In case connection to the websocket server has been lost, we are going to resort to a queue to send any new message when reconnected.
-local queue = {} 
+ndc.queue = ndc.queue or {} 
 
-local connectingPlayers = {}
-local playerJoinTimestamps = {}
+ndc.connectingPlayers = ndc.connectingPlayers or {}
+ndc.playerJoinTimestamps = ndc.playerJoinTimestamps or {}
 
-local websocket
+ndc.websocket = ndc.websocket
 function connectToWebsocket()
     if WS ~= nil then 
-        websocket = WS.Client("ws://" .. BotIP, PortNumber)
-        websocket:Connect()
+        ndc.websocket = WS.Client("ws://" .. ndc.BotIP, ndc.PortNumber)
+        ndc.websocket:Connect()
 
-        websocket:on("open", function()
-            websocket.connected = true
+        ndc.websocket:on("open", function()
+            ndc.websocket.connected = true
 
-            if #queue > 0 then 
-                websocket:Send(util.TableToJSON(queue))
-                queue = {}
+            if #ndc.queue > 0 then 
+                ndc.websocket:Send(util.TableToJSON(ndc.queue))
+                ndc.queue = {}
             end
 
             MsgN("Connection established to websocket server.")
         end)
 
-        websocket:on("message", function(data)
+        ndc.websocket:on("message", function(data)
             local packet = util.JSONToTable(data)
 
             if packet.requestStatus then 
                 local connecting = {}
-                for id, data in pairs(connectingPlayers) do 
+                for id, data in pairs(ndc.connectingPlayers) do 
                     table.insert(connecting, data)
                 end
 
                 local spawnedPlayers = {}
                 for i, ply in ipairs(player.GetAll()) do 
-                    table.insert(spawnedPlayers, {ply:Nick(), ply:SteamID(), playerJoinTimestamps[ply:SteamID()] or 0})
+                    table.insert(spawnedPlayers, {ply:Nick(), ply:SteamID(), ndc.playerJoinTimestamps[ply:SteamID()]})
                 end
 
                 local response = {}
@@ -101,15 +96,15 @@ function connectToWebsocket()
                 response.connectingPlayers = connecting
                 response.players = spawnedPlayers
 
-                websocket:Send(util.TableToJSON(response))
+                ndc.websocket:Send(util.TableToJSON(response))
             else 
                 notify(Color(88, 101, 242), "(Discord) ", hexToCol(packet.color), packet.author, Color(255, 255, 255), ": " .. packet.content)
             end
         end)
 
-        websocket:on("close", function()
+        ndc.websocket:on("close", function()
             MsgN("Websocket connection closed. Attempting to reconnect...")
-            if websocket.connected then 
+            if ndc.websocket.connected then 
                 connectToWebsocket()
             end
         end)
@@ -124,11 +119,11 @@ hook.Add("PlayerSay", "nubs_discord_communicator", function(ply, message)
         packet.fromSteamID = ply:SteamID64()
         packet.content = message
 
-        if websocket == nil or (websocket ~= nil and not websocket:IsActive()) then 
+        if ndc.websocket == nil or (ndc.websocket ~= nil and not ndc.websocket:IsActive()) then 
             connectToWebsocket()
-            table.insert(queue, packet)
-        elseif websocket ~= nil and websocket:IsActive() then 
-            websocket:Send(util.TableToJSON(packet))
+            table.insert(ndc.queue, packet)
+        elseif ndc.websocket ~= nil and ndc.websocket:IsActive() then 
+            ndc.websocket:Send(util.TableToJSON(packet))
         end
     else 
         MsgN("Discord communication inactive - missing required mod Gmod Websockets.")
@@ -144,15 +139,15 @@ hook.Add("player_connect", "discord_comms_join", function(ply)
         packet.username = ply.name
         packet.usersteamid = ply.networkid
 
-        if websocket == nil or (websocket ~= nil and not websocket:IsActive()) then 
+        if ndc.websocket == nil or (ndc.websocket ~= nil and not ndc.websocket:IsActive()) then 
             connectToWebsocket()
-            table.insert(queue, packet)
-        elseif websocket ~= nil and websocket:IsActive() then 
-            websocket:Send(util.TableToJSON(packet))
+            table.insert(ndc.queue, packet)
+        elseif ndc.websocket ~= nil and ndc.websocket:IsActive() then 
+            ndc.websocket:Send(util.TableToJSON(packet))
         end
 
-        connectingPlayers[ply.networkid] = {ply.name, ply.networkid, os.time()}
-        playerJoinTimestamps[ply.networkid] = os.time()
+        ndc.connectingPlayers[ply.networkid] = {ply.name, ply.networkid, os.time()}
+        ndc.playerJoinTimestamps[ply.networkid] = os.time()
     else 
         MsgN("Discord communication inactive - missing required mod Gmod Websockets.")
     end
@@ -165,15 +160,16 @@ hook.Add("PlayerInitialSpawn", "discord_comms_spawn", function(ply)
         packet.messagetype = 2 -- 1 = join, 2 = first spawn, 3 = leave
         packet.username = ply:Nick()
         packet.usersteamid = ply:SteamID()
+        packet.userjointime = ndc.playerJoinTimestamps[ply:SteamID()] or 0
 
-        if websocket == nil or (websocket ~= nil and not websocket:IsActive()) then 
+        if ndc.websocket == nil or (ndc.websocket ~= nil and not ndc.websocket:IsActive()) then 
             connectToWebsocket()
-            table.insert(queue, packet)
-        elseif websocket ~= nil and websocket:IsActive() then 
-            websocket:Send(util.TableToJSON(packet))
+            table.insert(ndc.queue, packet)
+        elseif ndc.websocket ~= nil and ndc.websocket:IsActive() then 
+            ndc.websocket:Send(util.TableToJSON(packet))
         end
 
-        connectingPlayers[ply:SteamID()] = nil
+        ndc.connectingPlayers[ply:SteamID()] = nil
     else 
         MsgN("Discord communication inactive - missing required mod Gmod Websockets.")
     end
@@ -189,14 +185,15 @@ hook.Add("player_disconnect", "nsz_comms_disconnect", function(ply)
         packet.usersteamid = ply.networkid
         packet.reason = ply.reason
 
-        if websocket == nil or (websocket ~= nil and not websocket:IsActive()) then 
+        if ndc.websocket == nil or (ndc.websocket ~= nil and not ndc.websocket:IsActive()) then 
             connectToWebsocket()
-            table.insert(queue, packet)
-        elseif websocket ~= nil and websocket:IsActive() then 
-            websocket:Send(util.TableToJSON(packet))
+            table.insert(ndc.queue, packet)
+        elseif ndc.websocket ~= nil and ndc.websocket:IsActive() then 
+            ndc.websocket:Send(util.TableToJSON(packet))
         end
 
-        connectingPlayers[ply.networkid] = nil -- This is already done in PlayerInitialSpawn, however not if they disconnect before they spawn. This ensures they get removed from connecting.
+        ndc.connectingPlayers[ply.networkid] = nil -- This is already done in PlayerInitialSpawn, however not if they disconnect before they spawn. This ensures they get removed from connecting.
+        ndc.playerJoinTimestamps[ply.networkid] = nil
     else 
         MsgN("Discord communication inactive - missing required mod Gmod Websockets.")
     end
@@ -205,4 +202,10 @@ end)
 hook.Add("Initialize", "discord_comms_init", function()
     MsgN("Attempting to establish connection to websocket server...")
     connectToWebsocket()
+end)
+
+hook.Add("ShutDown", "discord_comms_disconnect", function() 
+    if WS ~= nil and ndc.websocket ~= nil and ndc.websocket:IsActive() then 
+        ndc.websocket:Close()
+    end
 end)

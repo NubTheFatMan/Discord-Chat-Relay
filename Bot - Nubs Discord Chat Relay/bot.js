@@ -5,7 +5,7 @@
 // exactly what you need/are doing with your bot. So I said fuck it and I might as well do that with everything :^) 
 
 // We need this to read and write the config file, and the connection log
-const { readFileSync, writeFile, appendFile } = require('fs');
+const { readFileSync, writeFile, appendFile, writeFileSync, existsSync, unlink } = require('fs');
 
 // Allows for the gmod server and the bot to communicate
 // At the time of writing this, I'm running ws version 8.5.0
@@ -74,7 +74,7 @@ async function getSteamAvatar(id) {
     }
 
     if (needsRefresh) {
-        let res = await get(`http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key=${config.SteamAPIKey}&steamids=${id}`).catch(console.error);
+        let res = await get(`http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key=${config.SteamAPIKey}&steamids=${id}`);
         avatarCache[id] = {
             avatar: res.data.response.players[0].avatarfull,
             lastFetched: Date.now()
@@ -106,7 +106,7 @@ async function sendQueue() {
                     if (avatarCache[packet.fromSteamID]) 
                         opts.avatarURL = avatarCache[packet.fromSteamID].avatar;
                     
-                    await webhook.send(opts).catch(console.error);
+                    await webhook.send(opts);
                 }
             } break;
 
@@ -121,7 +121,16 @@ async function sendQueue() {
                     } break;
 
                     case 2: {
-                        options.content = `${packet.username} (${packet.usersteamid}) has spawned into the server.`
+                        let spawnText = '';
+
+                        if (packet.userjointime) {
+                            let spawnTime = Math.round(Date.now()/1000) - packet.userjointime;
+                            let minutes = Math.floor(spawnTime / 60);
+                            let seconds = spawnTime % 60;
+                            spawnText = ` (took ${minutes}:${seconds < 10 ? `0${seconds}` : seconds})`;
+                        }
+
+                        options.content = `${packet.username} (${packet.usersteamid}) has spawned into the server${spawnText}.`
                     } break;
 
                     case 3: {
@@ -129,7 +138,7 @@ async function sendQueue() {
                     } break;
                 }
 
-                await webhook.send(options).catch(console.error);
+                await webhook.send(options);
             } break;
 
             case "status": {
@@ -148,12 +157,15 @@ async function sendQueue() {
                 for (let i = 0; i < packet.connectingPlayers.length; i++) {
                     let data = packet.connectingPlayers[i];
 
-                    let timeOnServer = now - data[2];
-                    let hours = Math.floor(timeOnServer / 60 / 60);
-                    let minutes = Math.floor(timeOnServer / 60) % 60;
-                    let seconds = timeOnServer % 60;
+                    let timeString = 'Unknown';
+                    if (data[2]) {
+                        let timeOnServer = now - data[2];
+                        let hours = Math.floor(timeOnServer / 60 / 60);
+                        let minutes = Math.floor(timeOnServer / 60) % 60;
+                        let seconds = timeOnServer % 60;
 
-                    let timeString = `${hours}:${minutes}:${seconds}`;
+                        timeString = `${hours}:${minutes < 10 ? `0${minutes}` : minutes}:${seconds < 10 ? `0${seconds}` : seconds}`;
+                    }
 
                     let currentStatus = "Connecting";
                     maxNameLength    = Math.max(maxNameLength, data[0].length);
@@ -167,12 +179,15 @@ async function sendQueue() {
                 for (let i = 0; i < packet.players.length; i++) {
                     let data = packet.players[i];
 
-                    let timeOnServer = now - data[2];
-                    let hours = Math.floor(timeOnServer / 60 / 60);
-                    let minutes = Math.floor(timeOnServer / 60) % 60;
-                    let seconds = timeOnServer % 60;
+                    let timeString = 'Unknown';
+                    if (data[2]) {
+                        let timeOnServer = now - data[2];
+                        let hours = Math.floor(timeOnServer / 60 / 60);
+                        let minutes = Math.floor(timeOnServer / 60) % 60;
+                        let seconds = timeOnServer % 60;
 
-                    let timeString = `${hours}:${minutes}:${seconds}`;
+                        timeString = `${hours}:${minutes < 10 ? `0${minutes}` : minutes}:${seconds < 10 ? `0${seconds}` : seconds}`;
+                    }
 
                     let currentStatus = "In Server";
                     maxNameLength    = Math.max(maxNameLength, data[0].length);
@@ -209,7 +224,28 @@ function getWebhook(json) {
         return;
 
     client.fetchWebhook(config.Webhook.ID, config.Webhook.Token)
-        .then(assignWebhook)
+        .then(wh => {
+            assignWebhook(wh);
+            if (json == true) {
+                let webhookOptions = {
+                    username: "Websocket Status",
+                    content: "Bot started. "
+                }
+
+                if (existsSync('./error.txt')) {
+                    webhookOptions.content += `Bot has just restarted from a crash:\`\`\`\n${readFileSync('./error.txt')}\`\`\``;
+                    unlink('./error.txt', error => {
+                        if (error) {
+                            console.log("Unable to delete error.txt. Previous crash report will reprint on next restart unless you manually delete the file");
+                            console.error(error);
+                        }
+                    });
+                }
+                
+                webhookOptions.content += "Awaiting server connection...";
+                wh.send(webhookOptions);
+            }
+        })
         .catch(() => {
             // Make a new webhook
             if (config.ChannelID.length === 0)
@@ -220,9 +256,7 @@ function getWebhook(json) {
                 guild.channels.createWebhook({
                     channel: config.ChannelID,
                     name: "Dickord Communication Relay"
-                })
-                    .then(wh => {assignWebhook(wh); saveConfig();})
-                    .catch(console.error);
+                }).then(wh => {assignWebhook(wh); saveConfig();});
             }
         });
 
@@ -258,8 +292,15 @@ wss.shouldHandle = req => {
 wss.on('connection', async ws => {
     relaySocket = ws;
 
+    if (webhook) {
+        webhook.send({
+            username: "Websocket Status",
+            content: "Connection to server established."
+        });
+    }
+
     relaySocket.on('message', buf => {
-        console.log('Message received from Websocket connection to server.');
+        // console.log('Message received from Websocket connection to server.');
         
         let json;
         try {
@@ -282,10 +323,51 @@ wss.on('connection', async ws => {
             }
         }
     });
+
+    relaySocket.on('error', error => {
+        console.log("Error occured in relay socket")
+        console.error(error);
+
+        if (webhook) {
+            webhook.send({
+                username: "Error Reporting",
+                content: `Error occured in the relay socket:\`\`\`\n${error.stack}\`\`\``
+            });
+        }
+    });
+    relaySocket.on('close', () => {
+        console.log("Connection to server closed.");
+        if (webhook) {
+            webhook.send({
+                username: "Websocket Status",
+                content: "Connection to server closed. Awaiting reconnect..."
+            });
+        }
+    });
 });
 
-wss.on('close', () => console.log('Websocket server connection closed.'));
-wss.on('error', err => console.log('Error occured in websocket server:\n' + err.stack));
+wss.on('error', async err => {
+    console.log('Error occured in websocket server:');
+    console.error(err);
+
+    if (webhook) {
+        await webhook.send({
+            username: "Error Reporting",
+            content: `Error occured in websocket server:\`\`\`\n${err.stack}\`\`\`Restarting`
+        });
+    }
+    process.exit();
+});
+wss.on('close', async () => {
+    console.log("Websocket server closed. What the..");
+    if (webhook) {
+        await webhook.send({
+            username: "Error Reporting",
+            content: "Websocket server closed for an unknown reason. Restarting..."
+        });
+    }
+    process.exit();
+});
 
 
 // Discord stuff
@@ -318,7 +400,7 @@ client.on('messageCreate', message => {
 client.on('interactionCreate', interaction => {
     if (interaction.isCommand() && interaction.commandName === "status") {
         if (relaySocket?.readyState !== 1) 
-            return interaction.reply('Server is not currently connected to my websocket. Unable to retrieve status.').catch(console.error);
+            return interaction.reply('There is currently no connection to the server. Unable to request status.');
 
         interaction.reply('Requesting server status...').then(() => {
             if (relaySocket?.readyState !== 1) return;
@@ -326,20 +408,37 @@ client.on('interactionCreate', interaction => {
             replyInteraction = interaction;
 
             relaySocket.send(Buffer.from(JSON.stringify({requestStatus: true})));
-        }).catch(console.error);
+        });
     }
 });
 
 client.on('ready', () => {
     console.log("Bot initialized");
 
-    // Get a webhook object
-    getWebhook();
+    getWebhook(true);
 
     client.application.commands.set([{
         name: "status",
         description: "View how many players are on the server along with the map."
-    }]).catch(console.error)
+    }]);
+});
+
+process.on('unhandledRejection', async (reason, promise) => {
+    console.error(reason);
+    if (client.isReady() && webhook) {
+        await webhook.send({
+            username: "Error Reporting",
+            content: `Unhandled promise rejection:\`\`\`\n${reason.stack}\`\`\``
+        });
+    }
+});
+
+process.on('uncaughtException', (error, origin) => {
+    if (origin !== "uncaughtException") return;
+    
+    console.error(error);
+    writeFileSync('./error.txt', error.stack);
+    process.exit();
 });
 
 client.login(config.DiscordBotToken);
