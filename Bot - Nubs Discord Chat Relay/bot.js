@@ -13,13 +13,14 @@ const { WebSocketServer } = require('ws');
 
 // Making a bot (duh)
 // At the time of making this, I'm running discord.js version 14.11.0
-const { Client, GatewayIntentBits, PermissionsBitField } = require('discord.js'); 
+const { Client, GatewayIntentBits, User, GuildMember } = require('discord.js'); 
 
 // We use http.get to get Steam avatars. If you don't want avatars, you can comment this out and not install axios from npm.
 // At the time of making this, I'm running axios version 1.4.0
 const { get } = require('axios');
 
-let config = JSON.parse(readFileSync("./config.json"));
+let config = require("./config.js");
+let webhookData = JSON.parse(readFileSync("./ids.json"));
 
 // Constants
 const wss = new WebSocketServer({host: '0.0.0.0', port: config.PortNumber}); // We set the host to '0.0.0.0' to tell the server we want to run IPv4 instead of IPv6
@@ -32,6 +33,29 @@ const client = new Client({
     ]
 });
 
+if (config.DiscordUsernameFix) {
+    // This is not a recommended thing to do, but since discord.js doesn't 
+    // appear to be supporting the new username system any time soon, here's my own crude fix.
+    // This will allow user global names to appear, as well as GuildMember.displayName showing it
+
+    User.prototype.__Relay_InjectPatch = User.prototype._patch;
+    User.prototype._patch = function (data) {
+        this.__Relay_InjectPatch(data);
+
+        if ('global_name' in data) {
+            this.globalName = data.global_name;
+        } else {
+            this.globalName ??= null;
+        }
+    }
+    Object.defineProperty(User.prototype, "displayName", {
+        get: function displayName() {return this.globalName ?? this.username;}
+    });
+
+    Object.defineProperty(GuildMember.prototype, "displayName", {
+        get: function displayName() {return this.nickname ?? this.user.displayName;}
+    });
+}
 
 
 // logConnection - Called when someone attempts to connect to the websocket server. Logs it to ./connection_log.txt
@@ -50,12 +74,12 @@ function logConnection(ip, status) {
 // assignWebhook takes a webhook object and stores it for later
 function assignWebhook(wh) {
     webhook = wh; 
-    config.Webhook.ID = webhook.id;
-    config.Webhook.Token = webhook.token;
+    webhookData.Webhook.ID = webhook.id;
+    webhookData.Webhook.Token = webhook.token;
 }
 
-function saveConfig() {
-    writeFile("./config.json", JSON.stringify(config, null, 4), err => {if (err) console.error(err);});
+function saveIds() {
+    writeFile("./ids.json", JSON.stringify(webhookData, null, 4), err => {if (err) console.error(err);});
 }
 
 // getSteamAvatar checks the avatar cache and refreshes them when needed.
@@ -86,6 +110,7 @@ async function getSteamAvatar(id) {
 let queue = [];
 let runningQueue = false;
 let replyInteraction;
+let statusTimeout;
 async function sendQueue() {
     if (!webhook || runningQueue)
         return; 
@@ -99,7 +124,7 @@ async function sendQueue() {
                 if (packet.content.length > 0) {
                     let opts = {
                         content: packet.content,
-                        username: `(Gmod) ${packet.from}`
+                        username: packet.from
                     }
                     
                     await getSteamAvatar(packet.fromSteamID);
@@ -112,7 +137,7 @@ async function sendQueue() {
 
             case "join/leave": {
                 let options = {
-                    username: "Gmod Player Connected"
+                    username: "Player Connection Status"
                 }
                 // 1 = join, 2 = spawn, 3 = leave
                 switch (packet.messagetype) {
@@ -143,6 +168,8 @@ async function sendQueue() {
 
             case "status": {
                 if (!replyInteraction) return;
+                if (statusTimeout) 
+                    clearTimeout(statusTimeout);
 
                 let [name, steamid, joined, status] = ['Name', 'Steam ID', 'Time Connected', "Status"];
 
@@ -179,9 +206,13 @@ async function sendQueue() {
                 for (let i = 0; i < packet.players.length; i++) {
                     let data = packet.players[i];
 
+                    if (data.name == undefined) data.name = "[no name received?]";
+                    if (data.steamid == undefined) data.steamid = "[no steamid received?]";
+
                     let timeString = 'Unknown';
-                    if (data[2]) {
-                        let timeOnServer = now - data[2];
+                    if (data.jointime) {
+                        // let timeOnServer = now - data.jointime;
+                        let timeOnServer = Math.round(data.jointime);
                         let hours = Math.floor(timeOnServer / 60 / 60);
                         let minutes = Math.floor(timeOnServer / 60) % 60;
                         let seconds = timeOnServer % 60;
@@ -189,13 +220,22 @@ async function sendQueue() {
                         timeString = `${hours}:${minutes < 10 ? `0${minutes}` : minutes}:${seconds < 10 ? `0${seconds}` : seconds}`;
                     }
 
-                    let currentStatus = "In Server";
-                    maxNameLength    = Math.max(maxNameLength, data[0].length);
-                    maxSteamidLength = Math.max(maxSteamidLength, data[1].length);
+                    let currentStatus = "Active";
+                    if (data.afktime) {
+                        let timeAFK = now - data.afktime;
+                        let hours = Math.floor(timeAFK / 60 / 60);
+                        let minutes = Math.floor(timeAFK / 60) % 60;
+                        let seconds = timeAFK % 60;
+
+                        currentStatus = `AFK for ${hours}:${minutes < 10 ? `0${minutes}` : minutes}:${seconds < 10 ? `0${seconds}` : seconds}`;
+                    }
+
+                    maxNameLength    = Math.max(maxNameLength, data.name.length);
+                    maxSteamidLength = Math.max(maxSteamidLength, data.steamid.length);
                     maxJoinTimestamp = Math.max(maxJoinTimestamp, timeString.length);
                     maxStatus        = Math.max(maxStatus, currentStatus.length);
 
-                    rows.push([data[0], data[1], timeString, currentStatus]);
+                    rows.push([data.name, data.steamid, timeString, currentStatus]);
                 }
 
                 let linesOfText = [
@@ -208,8 +248,8 @@ async function sendQueue() {
                     linesOfText.push(`| ${row[0] + ' '.repeat(maxNameLength - row[0].length)} | ${row[1] + ' '.repeat(maxSteamidLength - row[1].length)} | ${row[2] + ' '.repeat(maxJoinTimestamp - row[2].length)} | ${row[3] + ' '.repeat(maxStatus - row[3].length)} |`);
                 }
 
-                replyInteraction.editReply(`Playing on map ${packet.map}\`\`\`\n${linesOfText.join('\n')}\`\`\``).then(() => replyInteraction = undefined);
-            }
+                replyInteraction.editReply(`**${packet.players.length}** ${packet.players.length == 1 ? 'person is' : 'people are'} playing on map **${packet.map}**\`\`\`\n${linesOfText.join('\n')}\`\`\``).then(() => replyInteraction = undefined);
+            } break;
         }
     }
 
@@ -223,7 +263,7 @@ function getWebhook(json) {
     if (!client.isReady()) 
         return;
 
-    client.fetchWebhook(config.Webhook.ID, config.Webhook.Token)
+    client.fetchWebhook(webhookData.Webhook.ID, webhookData.Webhook.Token)
         .then(wh => {
             assignWebhook(wh);
             if (json == true) {
@@ -248,15 +288,14 @@ function getWebhook(json) {
         })
         .catch(() => {
             // Make a new webhook
-            if (config.ChannelID.length === 0)
+            if (webhookData.ChannelID.length === 0)
                 return console.log("Tried to create a webhook, but no channel has been set yet.");
 
-            let guild = client.guilds.resolve(config.GuildID);
-            if (guild) {
-                guild.channels.createWebhook({
-                    channel: config.ChannelID,
+            let channel = client.channels.resolve(webhookData.ChannelID);
+            if (channel) {
+                channel.createWebhook({
                     name: "Dickord Communication Relay"
-                }).then(wh => {assignWebhook(wh); saveConfig();});
+                }).then(wh => {assignWebhook(wh); saveIds();});
             }
         });
 
@@ -353,7 +392,7 @@ wss.on('error', async err => {
     if (webhook) {
         await webhook.send({
             username: "Error Reporting",
-            content: `Error occured in websocket server:\`\`\`\n${err.stack}\`\`\`Restarting`
+            content: `Error occured in websocket server:\`\`\`\n${err.stack}\`\`\`Restarting...`
         });
     }
     process.exit();
@@ -370,44 +409,188 @@ wss.on('close', async () => {
 });
 
 
+// Functions for eval (js)
+
+// Hides certain config values to prevent exposing private keys
+function sanitizePrivateValues(str) {
+    let newString = str.replaceAll(config.DiscordBotToken, "[Bot Token Hidden]");
+    if (config.SteamAPIKey.length > 0) 
+        newString = newString.replaceAll(config.SteamAPIKey, "[Steam API Key Hidden]");
+    if (webhookData.Webhook.Token.length > 0) 
+        newString = newString.replaceAll(webhookData.Webhook.Token, "[Webhook Token Hidden]");
+    // Don't need to hide config.ServerIP here since that's publicly known. Anyone who's ever
+    // connected to your server already has your ServerIP
+    
+    return newString;
+}
+
+// This is hacky, you probably should not do this. This temporarily overwrites console.log in the eval dev command to allow logging output at stages
+let normalConsoleLog = console.log;
+let temporaryLogs = [];
+function log() {
+    temporaryLogs.push(sanitizePrivateValues(Array.from(arguments).join(" ")));
+}
+function overwriteConsoleLog() {
+    temporaryLogs = [];
+    console.log = log;
+}
+function revertConsoleLog() {
+    console.log = normalConsoleLog;
+}
+
 // Discord stuff
-client.on('messageCreate', message => {
+client.on('messageCreate', async message => {
     if (message.author.bot)
         return; // Do nothing for bots
 
-    if (message.member.permissions.has(PermissionsBitField.Flags.ManageGuild, true) && message.content.toLowerCase() === "--setgmodchannel") {
-        config.ChannelID = message.channel.id;
-        config.GuildID   = message.guild.id;
-        saveConfig();
-        message.react('✅');
-    } else { 
-        if (message.channel.id === config.ChannelID && !message.system) {
-            if (relaySocket) {
-                if (relaySocket.readyState == 1) { // 1 means open, we can communicate to the server
-                    let data = {};
-                    data.color = message.member.displayHexColor;
-                    data.author = (typeof message.member.nickname === "string" ? message.member.nickname : (typeof message.author.displayName === "string" ? message.author.displayName : message.author.username));
-                    data.content = message.content;
-                    if (data.content.length === 0)
-                        data.content = "[attachment]";
-                    relaySocket.send(Buffer.from(JSON.stringify(data)));
+    let ranCommand = false;
+    if (config.Managers.includes(message.author.id) && message.content.trimStart().startsWith(config.ManagerCommandPrefix)) {
+        let inputText = message.content.trimStart().slice(config.ManagerCommandPrefix.length);
+        let command = inputText.split(' ', 1)[0].toLowerCase();
+        inputText = inputText.slice(command.length).trim();
+
+        ranCommand = true;
+        switch (command) {
+            case "setgmodchannel": {
+                webhookData.ChannelID = message.channel.id;
+                saveIds();
+                message.react('✅');
+            } break;
+
+            case "restart":
+            case "shutdown": {
+                message.react('✅').then(() => process.exit()).catch(() => process.exit());
+            } break;
+
+            case "console":
+            case "cmd":
+            case "concommand":
+            case "c":
+            case "command": {
+                if (relaySocket?.readyState == 1) {
+                    let packet = {};
+                    packet.type = "concommand";
+                    packet.from = message.member.displayName;
+                    packet.command = inputText;
+                    relaySocket.send(Buffer.from(JSON.stringify(packet)));
+                    message.react('✅');
+                } else {
+                    message.react('❌');
+                }
+            } break;
+
+            case "eval":
+            case "evaluate":
+            case "js_run": {
+                inputText = inputText.replace(/```(js)?/g, '');
+                if (inputText.length === 0) 
+                    return message.reply('Invalid input. Please provide JavaScript code to run.');
+                
+                try {
+                    overwriteConsoleLog();
+                    let result = eval(inputText);
+                    revertConsoleLog();
+
+                    let newMessageObject = {files: []};
+
+                    if (temporaryLogs.length > 0) {
+                        newMessageObject.files.push({attachment: Buffer.from(temporaryLogs.join('\n')), name: "console.txt"});
+                    }
+
+                    if (result === undefined || result === null) newMessageObject.content = "Evaluated successfully, no output.";
+                    else if (result instanceof Object || result instanceof Array) result = JSON.stringify(result, null, 2);
+                    else if (typeof result !== "string") result = result !== undefined ? result.toString() : "";
+
+                    if (!newMessageObject.content) {
+                        if (result.length > 256) {
+                            newMessageObject.content = `Evaluated without error.`;
+                            newMessageObject.files.push({attachment: Buffer.from(sanitizePrivateValues(result)), name: "result.txt"});
+                        } else {
+                            newMessageObject.content = `Evaluated without error.\`\`\`\n${sanitizePrivateValues(result)}\`\`\``;
+                        }
+                    }
+
+                    message.reply(newMessageObject);
+                } catch (error) {
+                    let newMessageObject = {
+                        content: `An error occured while evaluating that code.\`\`\`\n${sanitizePrivateValues(error.stack)}\`\`\``
+                    };
+                    if (temporaryLogs.length > 0) {
+                        newMessageObject.files = [{attachment: Buffer.from(temporaryLogs.join('\n')), name: "console.txt"}];
+                    }
+                    message.reply(newMessageObject);
+                }
+            } break;
+
+            default: {
+                ranCommand = false;
+            } break;
+        }        
+    } 
+
+    if (ranCommand) return;
+    if (message.channel.id !== webhookData.ChannelID || message.system) return;
+    if (relaySocket?.readyState !== 1) return; // 1 means open, we can communicate to the server
+    
+    let packet = {};
+    packet.type = "message";
+    packet.color = message.member.displayHexColor;
+    packet.author = message.member.displayName;
+    packet.content = message.cleanContent || "[attachment]";
+
+    if (message.reference) {
+        try {
+            let reference = await message.fetchReference();
+            if (reference.member) {
+                packet.replyingTo = {
+                    author: reference.member.displayName,
+                    color: reference.member.displayHexColor
+                }
+            } else if (reference.author) {
+                if (reference.author.id === client.user.id || reference.author.id === webhookData.Webhook.ID) {
+                    packet.replyingTo = {author: reference.author.username}
+                } else {
+                    try {
+                        let member = await message.guild.members.fetch(reference.author.id);
+                        if (member) {
+                            packet.replyingTo = {
+                                author: member.displayName,
+                                color: member.displayHexColor
+                            }
+                        } else {
+                            packet.replyingTo = {author: reference.author.username}
+                        }
+                    } catch (_) {
+                        packet.replyingTo = {author: reference.author.username}
+                    }
                 }
             }
-        }
+        } finally {}
     }
+
+    relaySocket.send(Buffer.from(JSON.stringify(packet)));
 });
 
 client.on('interactionCreate', interaction => {
     if (interaction.isCommand() && interaction.commandName === "status") {
         if (relaySocket?.readyState !== 1) 
-            return interaction.reply('There is currently no connection to the server. Unable to request status.');
+            return interaction.reply('There is currently no connection to the server. Unable to request status.\nThe server automatically reconnects when an event happens, such as a player joining/leaving, or sending a message on the server.');
 
         interaction.reply('Requesting server status...').then(() => {
-            if (relaySocket?.readyState !== 1) return;
+            if (relaySocket?.readyState !== 1) return interaction.editReply('Websocket is not connected.');
 
             replyInteraction = interaction;
 
-            relaySocket.send(Buffer.from(JSON.stringify({requestStatus: true})));
+            let packet = {};
+            packet.type = "status";
+            packet.from = interaction.member.displayName;
+            packet.color = interaction.member.displayHexColor;
+
+            relaySocket.send(Buffer.from(JSON.stringify(packet)));
+
+            statusTimeout = setTimeout(() => {
+                replyInteraction?.editReply("No response received from the server, however it is connected. The server may be hibernating, which occurs when no players are on the server.\nThe server could also not be responding, too much lag may be timing out the server.");
+            }, 5000);
         });
     }
 });

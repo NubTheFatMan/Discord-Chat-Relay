@@ -30,7 +30,7 @@ function notify(...) -- Function copied from the Evolve admin mod and modified t
         end
     end
     net.Broadcast()
-    MsgN("[Discord] " .. table.concat(strArg, " "))
+    MsgN(table.concat(strArg, ""))
 end
 
 -- Converting a hex string to a color 
@@ -59,6 +59,8 @@ ndc.queue = ndc.queue or {}
 ndc.connectingPlayers = ndc.connectingPlayers or {}
 ndc.playerJoinTimestamps = ndc.playerJoinTimestamps or {}
 
+ndc.afkPlayers = ndc.afkPlayers or {}
+
 ndc.websocket = ndc.websocket
 function connectToWebsocket()
     if WS ~= nil then 
@@ -79,15 +81,22 @@ function connectToWebsocket()
         ndc.websocket:on("message", function(data)
             local packet = util.JSONToTable(data)
 
-            if packet.requestStatus then 
+            local typeofRequest = packet.type
+
+            if typeofRequest == "status" then 
                 local connecting = {}
                 for id, data in pairs(ndc.connectingPlayers) do 
                     table.insert(connecting, data)
                 end
 
                 local spawnedPlayers = {}
-                for i, ply in ipairs(player.GetAll()) do 
-                    table.insert(spawnedPlayers, {ply:Nick(), ply:SteamID(), ndc.playerJoinTimestamps[ply:SteamID()]})
+                for i, ply in ipairs(player.GetHumans()) do 
+                    table.insert(spawnedPlayers, {
+                        name     = ply:Nick(), 
+                        steamid  = ply:SteamID(), 
+                        jointime = ply:TimeConnected(), 
+                        afktime  = ndc.afkPlayers[ply:SteamID()] or false
+                    })
                 end
 
                 local response = {}
@@ -97,8 +106,39 @@ function connectToWebsocket()
                 response.players = spawnedPlayers
 
                 ndc.websocket:Send(util.TableToJSON(response))
+                notify(Color(88, 101, 242), "(Discord) ", hexToCol(packet.color), packet.from, Color(255, 255, 255), " has requested server status.")
+            elseif typeofRequest == "concommand" then 
+                MsgN("Received console command from " .. packet.from .. " on Discord...")
+                MsgN("> " .. packet.command)
+                game.ConsoleCommand(packet.command .. "\n")
+            elseif typeofRequest == "message" then
+                local message = {Color(88, 101, 242), "(Discord) ", hexToCol(packet.color), packet.author, Color(255, 255, 255)}
+
+                if packet.replyingTo then 
+                    local replyColor
+                    if packet.replyingTo.color then 
+                        replyColor = hexToCol(packet.replyingTo.color)
+                    else 
+                        for _, player in ipairs(player.GetHumans()) do 
+                            if player:Nick() == packet.replyingTo.author then 
+                                replyColor = team.GetColor(player:Team())
+                                break
+                            end
+                        end
+                    end
+
+                    table.insert(message, " (replying to ")
+                    table.insert(message, replyColor or Color(255, 255, 255))
+                    table.insert(message, packet.replyingTo.author)
+                    table.insert(message, Color(255, 255, 255))
+                    table.insert(message, ")")
+                end
+                table.insert(message, ": " .. packet.content)
+
+                notify(unpack(message))
+                -- notify(Color(88, 101, 242), "(Discord) ", hexToCol(packet.color), packet.author, Color(255, 255, 255), ": " .. packet.content)
             else 
-                notify(Color(88, 101, 242), "(Discord) ", hexToCol(packet.color), packet.author, Color(255, 255, 255), ": " .. packet.content)
+                MsgN("Received invalid packet from Discord bot.")
             end
         end)
 
@@ -176,7 +216,7 @@ hook.Add("PlayerInitialSpawn", "discord_comms_spawn", function(ply)
 end)
 
 gameevent.Listen("player_disconnect")
-hook.Add("player_disconnect", "nsz_comms_disconnect", function(ply)
+hook.Add("player_disconnect", "ndc_comms_disconnect", function(ply)
     if WS ~= nil then 
         local packet = {}
         packet.type = "join/leave"
@@ -194,6 +234,7 @@ hook.Add("player_disconnect", "nsz_comms_disconnect", function(ply)
 
         ndc.connectingPlayers[ply.networkid] = nil -- This is already done in PlayerInitialSpawn, however not if they disconnect before they spawn. This ensures they get removed from connecting.
         ndc.playerJoinTimestamps[ply.networkid] = nil
+        ndc.afkPlayers[ply.networkid] = nil
     else 
         MsgN("Discord communication inactive - missing required mod Gmod Websockets.")
     end
@@ -207,5 +248,26 @@ end)
 hook.Add("ShutDown", "discord_comms_disconnect", function() 
     if WS ~= nil and ndc.websocket ~= nil and ndc.websocket:IsActive() then 
         ndc.websocket:Close()
+    end
+end)
+
+local lastCheckedAFK = 0
+hook.Add("Think", "ndc_afk_detection", function() 
+    local now = os.time()
+    if now - lastCheckedAFK >= ndc.AFKCheckInterval then 
+        lastCheckedAFK = now
+        for i, ply in ipairs(player.GetHumans()) do
+            local eyeAngles = ply:EyeAngles()
+            if eyeAngles ~= ply.ndc_EyeAngleCached then 
+                ply.ndc_EyeAngleCached = eyeAngles
+                ply.ndc_LastCached = now
+
+                ndc.afkPlayers[ply:SteamID()] = nil
+            end
+
+            if (not ndc.afkPlayers[ply:SteamID()]) and now - ply.ndc_LastCached >= ndc.AFKTimeout then
+                ndc.afkPlayers[ply:SteamID()] = now - ndc.AFKTimeout
+            end
+        end
     end
 end)
