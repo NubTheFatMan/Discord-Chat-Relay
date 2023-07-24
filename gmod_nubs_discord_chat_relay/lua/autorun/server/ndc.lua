@@ -126,6 +126,13 @@ function connectToWebsocket()
                             end
                         end
                     end
+                    if not replyColor then 
+                        replyColor = Color(255, 255, 255)
+                    else
+                        if replyColor.r == 0 and replyColor.g == 0 and replyColor.b == 0 then 
+                            replyColor = Color(255, 255, 255)
+                        end
+                    end
 
                     table.insert(message, " (replying to ")
                     table.insert(message, replyColor or Color(255, 255, 255))
@@ -152,6 +159,10 @@ function connectToWebsocket()
 end
 
 hook.Add("PlayerSay", "nubs_discord_communicator", function(ply, message)
+    for i, prefix in ipairs(ndc.HiddenMessageStarts) do 
+        if string.StartsWith(message, prefix) then return end
+    end
+
     if WS ~= nil then 
         local packet = {}
         packet.type = "message"

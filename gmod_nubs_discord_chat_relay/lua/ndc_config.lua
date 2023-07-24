@@ -22,3 +22,8 @@ ndc.AFKTimeout = 90
 -- How how many seconds should pass before the server checks who's afk again?
 -- Set it to 0 to check every tick.
 ndc.AFKCheckInterval = 3
+
+
+-- If a message starts with any of these, the message will not be sent to Discord. This will hide commands being used in the relay.
+-- If you want commands to be visible, remove all strings. Would look like this: ndc.HiddenMessageStarts = {}
+ndc.HiddenMessageStarts = {"!", "@", "/"}
