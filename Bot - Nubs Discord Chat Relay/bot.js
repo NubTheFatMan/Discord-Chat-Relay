@@ -63,7 +63,7 @@ function logConnection(ip, status) {
     let date = new Date();
     let timestamp = `[${date.getMonth() + 1}/${date.getDate()}/${date.getFullYear()} @ ${date.getHours()}:${date.getMinutes()}:${date.getSeconds()}]`;
 
-    let message = `${timestamp} ${status ? 'Accepting' : 'Denying'} websocket connection request from ${ip}`;
+    let message = `\n${timestamp} ${status ? 'Accepting' : 'Denying'} websocket connection request from ${ip}`;
 
     console.log(message);
 
@@ -530,7 +530,12 @@ client.on('messageCreate', async message => {
 
     if (ranCommand) return;
     if (message.channel.id !== webhookData.ChannelID || message.system) return;
-    if (relaySocket?.readyState !== 1) return; // 1 means open, we can communicate to the server
+    if (relaySocket?.readyState !== 1) return message.react('⚠️'); // 1 means open, we can communicate to the server
+
+    if (message.cleanContent.length > config.MaxMessageLength) return message.react('❌');
+
+    let lines = message.content.split('\n');
+    if (lines.length > config.LineBreakLimit) return message.react('❌');
     
     let packet = {};
     packet.type = "message";

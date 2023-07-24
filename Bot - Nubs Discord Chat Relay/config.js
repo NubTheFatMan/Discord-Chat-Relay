@@ -36,6 +36,12 @@ exports.SteamAvatarRefreshTime = 30;
 // request will be appended to connection_log.txt (generated once the server connects for the first time)
 exports.LogConnections = true;
 
+// How many lines should be allowed in a message before the relay decides to not send the message to the server?
+exports.LineBreakLimit = 4;
+
+// What is the maximum length of the message before it won't be sent to the server?
+exports.MaxMessageLength = 512;
+
 // This is the prefix for dev commands, see end of file
 exports.ManagerCommandPrefix = "--";
 
