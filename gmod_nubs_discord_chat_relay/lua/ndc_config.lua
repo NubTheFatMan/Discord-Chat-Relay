@@ -27,3 +27,12 @@ ndc.AFKCheckInterval = 3
 -- If a message starts with any of these, the message will not be sent to Discord. This will hide commands being used in the relay.
 -- If you want commands to be visible, remove all strings. Would look like this: ndc.HiddenMessageStarts = {}
 ndc.HiddenMessageStarts = {"!", "@", "/"}
+
+
+
+-- How many minutes should the server automatically send a status report to the relay? Set to 0 to disable. Does not send a report if nobody is on the server.
+ndc.AutomaticStatusInterval = 30
+
+
+-- How often in minutes should player stats be saved?
+ndc.StatsSaveInterval = 5

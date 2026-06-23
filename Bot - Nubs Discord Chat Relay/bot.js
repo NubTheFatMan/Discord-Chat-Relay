@@ -5,7 +5,7 @@
 // exactly what you need/are doing with your bot. So I said fuck it and I might as well do that with everything :^) 
 
 // We need this to read and write the config file, and the connection log
-const { readFileSync, writeFile, appendFile, writeFileSync, existsSync, unlink } = require('fs');
+const { readFileSync, writeFile, appendFile, writeFileSync, existsSync, unlink, lstatSync } = require('fs');
 
 // Allows for the gmod server and the bot to communicate
 // At the time of writing this, I'm running ws version 8.5.0
@@ -23,7 +23,7 @@ let config = require("./config.js");
 let webhookData = JSON.parse(readFileSync("./ids.json"));
 
 // Constants
-const wss = new WebSocketServer({host: '0.0.0.0', port: config.PortNumber}); // We set the host to '0.0.0.0' to tell the server we want to run IPv4 instead of IPv6
+const wss = new WebSocketServer({host: '0.0.0.0', port: config.PortNumber, clientTracking: true}); // We set the host to '0.0.0.0' to tell the server we want to run IPv4 instead of IPv6
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds, 
@@ -33,28 +33,35 @@ const client = new Client({
     ]
 });
 
-if (config.DiscordUsernameFix) {
-    // This is not a recommended thing to do, but since discord.js doesn't 
-    // appear to be supporting the new username system any time soon, here's my own crude fix.
-    // This will allow user global names to appear, as well as GuildMember.displayName showing it
-
-    User.prototype.__Relay_InjectPatch = User.prototype._patch;
-    User.prototype._patch = function (data) {
-        this.__Relay_InjectPatch(data);
-
-        if ('global_name' in data) {
-            this.globalName = data.global_name;
-        } else {
-            this.globalName ??= null;
-        }
+let pingMissed = 0;
+// let pingSent = 0;
+let pingReceived = false;
+function pingServer() {
+    if (relaySocket?.readyState !== 1) {
+        pingMissed = 0;
+        pingSent = 0;
+        pingReceived = false;
+        return;   
     }
-    Object.defineProperty(User.prototype, "displayName", {
-        get: function displayName() {return this.globalName ?? this.username;}
-    });
 
-    Object.defineProperty(GuildMember.prototype, "displayName", {
-        get: function displayName() {return this.nickname ?? this.user.displayName;}
-    });
+    if (!pingReceived)
+        pingMissed++
+
+    if (pingMissed >= config.PingTimeout) {
+        relaySocket.close();
+        if (webhook) {
+            webhook.send({
+                username: config.Language.NameWebsocketStatus,
+                content: config.Language.ConnectionClosedNoPing
+            });
+        }
+        return;
+    }
+
+    pingReceived = false;
+
+    relaySocket.send(Buffer.from('{"type":"ping"}'));
+    // pingSent = Date.now();
 }
 
 
@@ -82,9 +89,11 @@ function saveIds() {
     writeFile("./ids.json", JSON.stringify(webhookData, null, 4), err => {if (err) console.error(err);});
 }
 
+let stringVarRegex = /\$[a-zA-Z]+/g;
+
 // getSteamAvatar checks the avatar cache and refreshes them when needed.
 let avatarCache = {};
-async function getSteamAvatar(id) {
+async function getSteamAvatar(id, name) {
     if (config.SteamAPIKey.length === 0) // If there is no API key specified, they must not want avatars.
         return;
 
@@ -98,12 +107,115 @@ async function getSteamAvatar(id) {
     }
 
     if (needsRefresh) {
-        let res = await get(`http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key=${config.SteamAPIKey}&steamids=${id}`);
-        avatarCache[id] = {
-            avatar: res.data.response.players[0].avatarfull,
-            lastFetched: Date.now()
-        };
+        try {
+            let res = await get(`http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key=${config.SteamAPIKey}&steamids=${id}`);
+            avatarCache[id] = {
+                avatar: res.data.response.players[0].avatarfull,
+                lastFetched: Date.now()
+            };
+        } catch (error) {
+            // let errMsg = `Unabled to get Steam avatar for ${name} (${id}): Steam API responded with ${error.status}`;
+            let statusCode = error.message.match(/[0-9]+/);
+
+            if (statusCode) 
+                statusCode = statusCode[0];
+            else
+                statusCode = error.message;
+
+            let errMsg = config.Language.ErrorAxiosGet.replace(stringVarRegex, match => {
+                switch (match.substring(1)) {
+                    case "name": return name;
+                    case "id":   return id;
+                    case "code": return statusCode;
+                    default:     return match;
+                }
+            });
+
+            if (statusCode == 429) errMsg += config.Language.ErrorAxios429;
+            console.log(errMsg);
+
+            if (client.isReady() && webhook) {
+                await webhook.send({
+                    username: config.Language.NameErrorReporting,
+                    content: errMsg
+                });
+            }
+        }
     }
+}
+
+// Removes formatting from text.
+function removeFormatting(str) {
+    let escapeCharacters = /(```|[*_#|>`])/g;
+    return str.replace(escapeCharacters, match => {
+        switch (match) {
+            case "*": return "\\*";
+            case "_": return "\\_";
+            case "#": return "\\#";
+            case "|": return "\\|";
+            case ">": return "\\>";
+            case "```": return "\\```";
+            case "`": return "\\`";
+            default: return match;
+        }
+    });
+}
+
+/*
+    Formats an object for printing on Discord
+    obj format: {"Key 1": ["Value 1", "Value 2"], "Key 2": ["Value 3", "Value 4"]}. Arrays must be same length
+    alignment format: {"Key 2": 1} where any key that == 1 is aligned to the right, otherwise aligned to the left
+
+    Example: tablePrint({test1: ["1", "2"], test2: ["123456", "789"]}, {test2: 1}) prints the following:
+    | test1 | test2  |
+    |-------|--------|
+    | 1     | 123456 |
+    | 2     |    789 |
+*/
+function tablePrint(obj, alignment = {}) {
+    let keys = Object.keys(obj);
+    let maxLength = {};
+    for (let key of keys) {
+        maxLength[key] = key.length;
+        for (let value of obj[key]) {
+            maxLength[key] = Math.max(maxLength[key], value.length);
+        }
+    }
+
+    let rows = [];
+
+    let firstRow = [];
+    let secondRow = [];
+    for (let key of keys) {
+        firstRow.push(key + ' '.repeat(Math.max(0, maxLength[key] - key.length)));
+        secondRow.push('-'.repeat(Math.max(0, maxLength[key])));
+    }
+    rows.push(`| ${firstRow.join(' | ')} |`);
+    rows.push(`|-${secondRow.join('-|-')}-|`);
+
+    // Each obj[key] is expected to have the same length
+    for (let i = 0; i < obj[keys[0]].length; i++) {
+        let line = [];
+        for (let key of keys) {
+            let val = obj[key][i];
+            line.push(alignment[key] === 1 ? ' '.repeat(Math.max(0, maxLength[key] - val.length)) + val : val + ' '.repeat(Math.max(0, maxLength[key] - val.length)));
+        }
+        rows.push(`| ${line.join(' | ')} |`);
+    }
+
+    return rows.join('\n')
+}
+
+function formatTime(timeInSeconds = 0) {
+    let hours = Math.floor(timeInSeconds / 60 / 60);
+    let minutes = Math.floor(timeInSeconds / 60) % 60;
+    let seconds = Math.floor(timeInSeconds % 60);
+
+    let timeArray = [];
+    if (hours > 0) timeArray.push(hours);
+    timeArray.push(minutes < 10 && hours > 0 ? `0${minutes}` : minutes);
+    timeArray.push(seconds < 10 ? `0${seconds}` : seconds);
+    return timeArray.join(':');
 }
 
 // I use a queueing system to stack up messages to be sent through the webhook. I wait for the previous webhook to send just in case they try to send out of order.
@@ -111,23 +223,35 @@ let queue = [];
 let runningQueue = false;
 let replyInteraction;
 let statusTimeout;
+let waitingForReply = false;
+let statsInteraction;
+let statsTimeout;
+let waitingForStats = false;
 async function sendQueue() {
     if (!webhook || runningQueue)
         return; 
 
     runningQueue = true;
 
+    // Any message from the server indicates it's connected, count it as a ping so it doesn't disconnect.
+    pingReceived = true;
+    pingMissed = 0;
+
     for (let i = 0; i < queue.length; i++) {
         let packet = queue[i];
         switch (packet.type) {
             case "message": {
-                if (packet.content.length > 0) {
+                if (packet.content.trim().length > 0) {
+                    let name = packet.from.replaceAll('```', ''); // Omit code block starters. Discord doesn't allow them in names
+                    if (name.length > 32) 
+                        name = name.substring(0, 29) + '...';
+
                     let opts = {
-                        content: packet.content,
-                        username: packet.from
+                        content: removeFormatting(packet.content.trim()),
+                        username: name
                     }
                     
-                    await getSteamAvatar(packet.fromSteamID);
+                    await getSteamAvatar(packet.fromSteamID, packet.from);
                     if (avatarCache[packet.fromSteamID]) 
                         opts.avatarURL = avatarCache[packet.fromSteamID].avatar;
                     
@@ -137,41 +261,103 @@ async function sendQueue() {
 
             case "join/leave": {
                 let options = {
-                    username: "Player Connection Status"
+                    username: config.Language.NamePlayerConnectionStatus
                 }
                 // 1 = join, 2 = spawn, 3 = leave
                 switch (packet.messagetype) {
                     case 1: {
-                        options.content = `${packet.username} (${packet.usersteamid}) has connected to the server.`;
+                        options.content = config.Language.PlayerConnected.replace(stringVarRegex, match => {
+                            switch (match.substring(1)) {
+                                case "name":    return removeFormatting(packet.username);
+                                case "steamid": return packet.usersteamid;
+                                default:        return match;
+                            }
+                        });
                     } break;
 
                     case 2: {
-                        let spawnText = '';
-
+                        let timeTaken;
                         if (packet.userjointime) {
                             let spawnTime = Math.round(Date.now()/1000) - packet.userjointime;
                             let minutes = Math.floor(spawnTime / 60);
                             let seconds = spawnTime % 60;
-                            spawnText = ` (took ${minutes}:${seconds < 10 ? `0${seconds}` : seconds})`;
+                            let time = `${minutes}:${seconds < 10 ? `0${seconds}` : seconds}`;
+                            timeTaken = config.Language.TimeTaken.replace(stringVarRegex, match => {
+                                switch (match.substring(1)) {
+                                    case "time": return time;
+                                    default:     return match;
+                                }
+                            });
                         }
 
-                        options.content = `${packet.username} (${packet.usersteamid}) has spawned into the server${spawnText}.`
+                        let lastJoined;
+                        if (packet.lastplay) {
+                            let timeSinceLastPlayed = Math.round(Date.now()/1000) - packet.lastplay;
+                            let hours = Math.floor(timeSinceLastPlayed / 60 / 60);
+                            let minutes = Math.floor(timeSinceLastPlayed / 60) % 60;
+                            let seconds = timeSinceLastPlayed % 60
+                            
+                            let timeArray = [];
+                            if (hours > 0) timeArray.push(hours);
+                            timeArray.push(minutes < 10 && hours > 0 ? `0${minutes}` : minutes);
+                            timeArray.push(seconds < 10 ? `0${seconds}` : seconds);
+
+                            let lastName;
+                            if (packet.lastname != packet.username) {
+                                lastName = config.Language.LastName.replace(stringVarRegex, match => {
+                                    switch(match.substring(1)) {
+                                        case "previousname": return removeFormatting(packet.lastname);
+                                        default:             return match;
+                                    }
+                                });
+                            }
+
+                            lastJoined = config.Language.LastJoined.replace(stringVarRegex, match => {
+                                switch(match.substring(1)) {
+                                    case "timesince": return timeArray.join(':');
+                                    case "date":      return `<t:${packet.lastplay}:F>`;
+                                    case "LastName":  return lastName ?? "";
+                                    default:          return match;
+                                }
+                            });
+                        }
+
+                        options.content = config.Language.PlayerSpawned.replace(stringVarRegex, match => {
+                            switch (match.substring(1)) {
+                                case "name":       return removeFormatting(packet.username);
+                                case "steamid":    return packet.usersteamid;
+                                case "TimeTaken":  return timeTaken ?? "";
+                                case "LastJoined": return lastJoined ?? "";
+                                default:           return match;
+                            }
+                        });
+                        // options.content += '```json\n' + JSON.stringify(packet, null, 2) + '```';
                     } break;
 
                     case 3: {
-                        options.content = `${packet.username} (${packet.usersteamid}) has left the server (${packet.reason}).`
+                        options.content = config.Language.PlayerLeft.replace(stringVarRegex, match => {
+                            switch (match.substring(1)) {
+                                case "name":    return removeFormatting(packet.username);
+                                case "steamid": return packet.usersteamid;
+                                case "reason":  return removeFormatting(packet.reason);
+                                default:        return match;
+                            }
+                        });
                     } break;
                 }
 
+                options.content = options.content;
                 await webhook.send(options);
             } break;
 
+            case "autostatus":
             case "status": {
-                if (!replyInteraction) return;
                 if (statusTimeout) 
                     clearTimeout(statusTimeout);
 
-                let [name, steamid, joined, status] = ['Name', 'Steam ID', 'Time Connected', "Status"];
+                if (packet.type === "status" && (!replyInteraction || !waitingForReply)) return;
+
+                let [name, steamid, joined, status] = config.Language.StatusTable;
 
                 let maxNameLength    = name.length;
                 let maxSteamidLength = steamid.length;
@@ -179,63 +365,92 @@ async function sendQueue() {
                 let maxStatus        = status.length
 
                 let rows = [];
-
                 let now = Math.round(Date.now()/1000);
-                for (let i = 0; i < packet.connectingPlayers.length; i++) {
-                    let data = packet.connectingPlayers[i];
-
-                    let timeString = 'Unknown';
-                    if (data[2]) {
-                        let timeOnServer = now - data[2];
-                        let hours = Math.floor(timeOnServer / 60 / 60);
-                        let minutes = Math.floor(timeOnServer / 60) % 60;
-                        let seconds = timeOnServer % 60;
-
-                        timeString = `${hours}:${minutes < 10 ? `0${minutes}` : minutes}:${seconds < 10 ? `0${seconds}` : seconds}`;
-                    }
-
-                    let currentStatus = "Connecting";
-                    maxNameLength    = Math.max(maxNameLength, data[0].length);
-                    maxSteamidLength = Math.max(maxSteamidLength, data[1].length);
-                    maxJoinTimestamp = Math.max(maxJoinTimestamp, timeString.length);
-                    maxStatus        = Math.max(maxStatus, currentStatus.length);
-
-                    rows.push([data[0], data[1], timeString, currentStatus]);
-                }
+                
+                packet.players.sort((a, b) => {
+                    if (a.jointime && b.jointime)
+                        return b.jointime - a.jointime;
+                    return 0;
+                });
 
                 for (let i = 0; i < packet.players.length; i++) {
                     let data = packet.players[i];
-
-                    if (data.name == undefined) data.name = "[no name received?]";
-                    if (data.steamid == undefined) data.steamid = "[no steamid received?]";
-
-                    let timeString = 'Unknown';
+                    let timeString = config.Language.StatusUnknownTime;
                     if (data.jointime) {
-                        // let timeOnServer = now - data.jointime;
                         let timeOnServer = Math.round(data.jointime);
                         let hours = Math.floor(timeOnServer / 60 / 60);
                         let minutes = Math.floor(timeOnServer / 60) % 60;
                         let seconds = timeOnServer % 60;
 
-                        timeString = `${hours}:${minutes < 10 ? `0${minutes}` : minutes}:${seconds < 10 ? `0${seconds}` : seconds}`;
+                        let timeArray = [];
+                        if (hours > 0) timeArray.push(hours);
+                        timeArray.push(minutes < 10 && hours > 0 ? `0${minutes}` : minutes);
+                        timeArray.push(seconds < 10 ? `0${seconds}` : seconds);
+                        timeString = timeArray.join(':');
                     }
 
-                    let currentStatus = "Active";
+                    let currentStatus = config.Language.StatusActive;
                     if (data.afktime) {
                         let timeAFK = now - data.afktime;
                         let hours = Math.floor(timeAFK / 60 / 60);
                         let minutes = Math.floor(timeAFK / 60) % 60;
                         let seconds = timeAFK % 60;
 
-                        currentStatus = `AFK for ${hours}:${minutes < 10 ? `0${minutes}` : minutes}:${seconds < 10 ? `0${seconds}` : seconds}`;
+                        let timeArray = [];
+                        if (hours > 0) timeArray.push(hours);
+                        timeArray.push(minutes < 10 && hours > 0 ? `0${minutes}` : minutes);
+                        timeArray.push(seconds < 10 ? `0${seconds}` : seconds);
+                        let afkTimeString = timeArray.join(':');
+                    
+                        currentStatus = config.Language.StatusAFK.replace(stringVarRegex, match => {
+                            switch (match.substring(1)) {
+                                case "time": return afkTimeString;
+                                default:     return match;
+                            }
+                        });
                     }
 
-                    maxNameLength    = Math.max(maxNameLength, data.name.length);
+                    data.name = data.name.replaceAll('```', '`\u2063`\u2063`');
+
+                    maxNameLength    = Math.max(maxNameLength,    data.name.length);
                     maxSteamidLength = Math.max(maxSteamidLength, data.steamid.length);
                     maxJoinTimestamp = Math.max(maxJoinTimestamp, timeString.length);
-                    maxStatus        = Math.max(maxStatus, currentStatus.length);
+                    maxStatus        = Math.max(maxStatus,        currentStatus.length);
 
                     rows.push([data.name, data.steamid, timeString, currentStatus]);
+                }
+
+                packet.connectingPlayers.sort((a, b) => {
+                    if (a[2] && b[2])
+                        return b[2] - a[2];
+                    return 0;
+                });
+                for (let i = 0; i < packet.connectingPlayers.length; i++) {
+                    let data = packet.connectingPlayers[i];
+
+                    let timeString = config.Language.StatusUnknownTime;
+                    if (data[2]) {
+                        let timeOnServer = now - data[2];
+                        let hours = Math.floor(timeOnServer / 60 / 60);
+                        let minutes = Math.floor(timeOnServer / 60) % 60;
+                        let seconds = timeOnServer % 60;
+
+                        let timeArray = [];
+                        if (hours > 0) timeArray.push(hours);
+                        timeArray.push(minutes < 10 && hours > 0 ? `0${minutes}` : minutes);
+                        timeArray.push(seconds < 10 ? `0${seconds}` : seconds);
+                        timeString = timeArray.join(':');
+                    }
+
+                    data[0] = data[0].replaceAll('```', '`\u2063`\u2063`');
+
+                    let currentStatus = config.Language.StatusConnecting;
+                    maxNameLength     = Math.max(maxNameLength,    data[0].length);
+                    maxSteamidLength  = Math.max(maxSteamidLength, data[1].length);
+                    maxJoinTimestamp  = Math.max(maxJoinTimestamp, timeString.length);
+                    maxStatus         = Math.max(maxStatus,        currentStatus.length);
+
+                    rows.push([data[0], data[1], timeString, currentStatus]);
                 }
 
                 let linesOfText = [
@@ -245,11 +460,166 @@ async function sendQueue() {
 
                 for (let i = 0; i < rows.length; i++) {
                     let row = rows[i];
-                    linesOfText.push(`| ${row[0] + ' '.repeat(maxNameLength - row[0].length)} | ${row[1] + ' '.repeat(maxSteamidLength - row[1].length)} | ${row[2] + ' '.repeat(maxJoinTimestamp - row[2].length)} | ${row[3] + ' '.repeat(maxStatus - row[3].length)} |`);
+                    let mn = Math.max(0, maxNameLength - row[0].length);
+                    let msi = Math.max(0, maxSteamidLength - row[1].length);
+                    let mj = Math.max(0, maxJoinTimestamp - row[2].length);
+                    let ms = Math.max(0, maxStatus - row[3].length);
+                    
+                    // Add spaces for empty characters
+                    let matches = row[0].match(/\u2063/g);
+                    if (matches) mn += matches.length;
+
+                    linesOfText.push(`| ${row[0] + ' '.repeat(mn)} | ${row[1] + ' '.repeat(msi)} | ${' '.repeat(mj) + row[2]} | ${row[3] + ' '.repeat(ms)} |`);
                 }
 
-                replyInteraction.editReply(`**${packet.players.length}** ${packet.players.length == 1 ? 'person is' : 'people are'} playing on map **${packet.map}**\`\`\`\n${linesOfText.join('\n')}\`\`\``).then(() => replyInteraction = undefined);
+                let firstLine = config.Language.StatusResponse.replace(stringVarRegex, match => {
+                    switch (match.substring(1)) {
+                        case "connectingPlayers": return packet.connectingPlayers.length;
+                        case "spawnedPlayers":    return packet.players.length;
+                        case "allPlayers":        return packet.connectingPlayers.length + packet.players.length;
+                        case "playerLimit":       return packet.playerlimit;
+                        case "map":               return packet.map;
+                        default:                  return match;
+                    }
+                });
+                
+                let msgContent = firstLine + '```\n' + linesOfText.join('\n') + '```';
+                let minified = false;
+
+                // Message is to long, rebuild the lines of text to have reduced detail.
+                if (msgContent.length >= 2000) {
+                    minified = true;
+                    msgContent = firstLine + "\n" + config.Language.StatusTooLongMinify;
+
+                    let minLinesOfText = [
+                        `| ${name + ' '.repeat(maxNameLength - name.length)} | ${joined + ' '.repeat(maxJoinTimestamp - joined.length)} |`,
+                        `|${'-'.repeat(maxNameLength + 2)}|${'-'.repeat(maxJoinTimestamp + 2)}|`
+                    ];
+    
+                    for (let i = 0; i < rows.length; i++) {
+                        let row = rows[i];
+                        let mn = Math.max(0, maxNameLength - row[0].length);
+                        let mj = Math.max(0, maxJoinTimestamp - row[2].length);
+                        minLinesOfText.push(`| ${row[0] + ' '.repeat(mn)} | ${row[2] + ' '.repeat(mj)} |`);
+                    }
+
+                    msgContent += '```\n' + minLinesOfText.join('\n') + '```';
+                }
+
+                if (msgContent.length >= 2000) {
+                    minified = true;
+                    msgContent = firstLine + "\n" + config.Language.StatusStillTooLong;
+                }
+
+                if (packet.type === "status") {
+                    await replyInteraction.editReply(msgContent);
+    
+                    if (minified)
+                        await replyInteraction.channel.send({content: config.Language.StatusTooLongFullReport, files: [{name: "status-report.txt", attachment: Buffer.from(linesOfText.join('\n'))}]});
+                } else {
+                    let toSend = {}
+                    toSend.username = config.Language.NameAutoStatus;
+                    toSend.content = firstLine + '```\n' + linesOfText.join('\n') + '```';
+                    if (toSend.content.length >= 2000) {
+                        toSend.content = firstLine;
+                        toSend.files = [{name: "status-report.txt", attachment: Buffer.from(linesOfText.join('\n'))}];
+                    }
+
+                    webhook.send(toSend);
+                }
+
+                if (packet.type === "status") {
+                    waitingForReply = false;
+                    replyInteraction = undefined;
+                }
             } break;
+
+            case "plystats": {
+                if (statsTimeout) 
+                    clearTimeout(statsTimeout);
+
+                if (!statsInteraction || !waitingForStats) return;
+
+                writeFile('./playerstats.json', JSON.stringify(packet.stats), err => {if (err) console.error(err);});
+                
+                let [name, playtime, kd] = ["Name", "Playtime (actual/AFK)", "K/D Ratio (Kills/Deaths)"];
+                let statsTable = {}
+                statsTable[name] = [];
+                statsTable[playtime] = [];
+                statsTable[kd] = [];
+
+                let players = [];
+                if (packet.connectedPlayers) {
+                    for (let id of packet.connectedPlayers) {
+                        if (packet.stats[id])
+                            players.push(packet.stats[id]);
+                    }
+                } else {
+
+                }
+
+                switch(packet.sort) {
+                    // actual playtime
+                    case 0: players.sort((a, b) => b.playtime - a.playtime); break;
+                        
+                    // afk playtime
+                    case 1: players.sort((a, b) => b.afktime - a.afktime); break;
+
+                    // total playtime
+                    case 2: players.sort((a, b) => (b.playtime + b.afktime) - (a.playtime + a.afktime)); break;
+
+                    // kills
+                    case 3: players.sort((a, b) => b.kills - a.kills); break;
+                    
+                    // deaths
+                    case 4: players.sort((a, b) => b.deaths - a.deaths); break;
+                    
+                    // k/d ratio
+                    case 5: players.sort((a, b) => (b.kills/Math.max(b.deaths, 1)) - (a.kills/Math.max(a.deaths, 1))); break;
+                }
+
+                for (let i = 0; i < packet.connectedPlayers?.length ?? 10; i++) {
+                    let ply = players[i];
+                    if (!(ply instanceof Object)) break;
+
+                    statsTable[name].push(removeFormatting(ply.lastname));
+                    statsTable[playtime].push(`${formatTime(ply.playtime + ply.afktime)} total (${formatTime(ply.playtime)} actual/${formatTime(ply.afktime)} AFK)`);
+                    statsTable[kd].push(`${(ply.kills/Math.max(ply.deaths, 1)).toFixed(4)} (${ply.kills}/${ply.deaths})`);
+                }
+
+                let sortedBy = "unknown";
+                switch (packet.sort) {
+                    case 0: sortedBy = "actual playtime"; break;
+                    case 1: sortedBy = "afk playtime"; break;
+                    case 2: sortedBy = "total playtime"; break;
+                    case 3: sortedBy = "kills"; break;
+                    case 4: sortedBy = "deaths"; break;
+                    case 5: sortedBy = "k/d ratio"; break;
+                }
+
+                let firstLine = packet.connectedPlayers instanceof Array ? 'Showing the stats of connected players ' : 'Showing the top player stats ';
+                firstLine += `sorted by __**${sortedBy}**__.`;
+
+                statsInteraction.editReply(firstLine + '```\n' + tablePrint(statsTable) + '```');
+
+                waitingForStats = false;
+                statsInteraction = undefined;
+            } break;
+        
+            case "hybernation": {
+                webhook.send({
+                    username: config.Language.NameWebsocketStatus,
+                    content: config.Language.Hybernating
+                });
+                relaySocket?.close();
+            } break;
+
+            // case "replyPing": {
+            //     if (Date.now() - pingSent <= config.ReplyPingTimeout * 1000) {
+            //         pingReceived = true;
+            //         pingMissed = 0;
+            //     }
+            // } break;
         }
     }
 
@@ -268,12 +638,12 @@ function getWebhook(json) {
             assignWebhook(wh);
             if (json == true) {
                 let webhookOptions = {
-                    username: "Websocket Status",
-                    content: "Bot started. "
+                    username: config.Language.NameWebsocketStatus,
+                    content: config.Language.BotStarted
                 }
 
                 if (existsSync('./error.txt')) {
-                    webhookOptions.content += `Bot has just restarted from a crash:\`\`\`\n${readFileSync('./error.txt')}\`\`\``;
+                    webhookOptions.content += `\n${config.Language.ErrorRestartedFromCrash}\`\`\`\n${readFileSync('./error.txt')}\`\`\``;
                     unlink('./error.txt', error => {
                         if (error) {
                             console.log("Unable to delete error.txt. Previous crash report will reprint on next restart unless you manually delete the file");
@@ -282,7 +652,6 @@ function getWebhook(json) {
                     });
                 }
                 
-                webhookOptions.content += "Awaiting server connection...";
                 wh.send(webhookOptions);
             }
         })
@@ -294,7 +663,7 @@ function getWebhook(json) {
             let channel = client.channels.resolve(webhookData.ChannelID);
             if (channel) {
                 channel.createWebhook({
-                    name: "Dickord Communication Relay"
+                    name: "Gmod Communication Relay"
                 }).then(wh => {assignWebhook(wh); saveIds();});
             }
         });
@@ -333,8 +702,8 @@ wss.on('connection', async ws => {
 
     if (webhook) {
         webhook.send({
-            username: "Websocket Status",
-            content: "Connection to server established."
+            username: config.Language.NameWebsocketStatus,
+            content: config.Language.ConnectionEstablished
         });
     }
 
@@ -345,7 +714,7 @@ wss.on('connection', async ws => {
         try {
             json = JSON.parse(buf.toString());
         } catch(err) {
-            console.log("Invalid JSON received from server.");
+            return console.log("Invalid JSON received from server.");
         }
 
         if (!webhook) {
@@ -364,13 +733,13 @@ wss.on('connection', async ws => {
     });
 
     relaySocket.on('error', error => {
-        console.log("Error occured in relay socket")
+        console.log("Error occured in relay socket");
         console.error(error);
 
         if (webhook) {
             webhook.send({
-                username: "Error Reporting",
-                content: `Error occured in the relay socket:\`\`\`\n${error.stack}\`\`\``
+                username: config.Language.NameErrorReporting,
+                content: `${config.Language.ErrorRelaySocket}\`\`\`\n${error.stack}\`\`\``
             });
         }
     });
@@ -378,8 +747,8 @@ wss.on('connection', async ws => {
         console.log("Connection to server closed.");
         if (webhook) {
             webhook.send({
-                username: "Websocket Status",
-                content: "Connection to server closed. Awaiting reconnect..."
+                username: config.Language.NameWebsocketStatus,
+                content: config.Language.ConnectionClosed
             });
         }
     });
@@ -391,8 +760,8 @@ wss.on('error', async err => {
 
     if (webhook) {
         await webhook.send({
-            username: "Error Reporting",
-            content: `Error occured in websocket server:\`\`\`\n${err.stack}\`\`\`Restarting...`
+            username: config.Language.NameErrorReporting,
+            content: `${config.Language.ErrorWebsocketServer}\`\`\`\n${err.stack}\`\`\`Restarting...`
         });
     }
     process.exit();
@@ -401,8 +770,8 @@ wss.on('close', async () => {
     console.log("Websocket server closed. What the..");
     if (webhook) {
         await webhook.send({
-            username: "Error Reporting",
-            content: "Websocket server closed for an unknown reason. Restarting..."
+            username: config.Language.NameErrorReporting,
+            content: config.Language.ErrorWebsocketServerClosed
         });
     }
     process.exit();
@@ -413,11 +782,11 @@ wss.on('close', async () => {
 
 // Hides certain config values to prevent exposing private keys
 function sanitizePrivateValues(str) {
-    let newString = str.replaceAll(config.DiscordBotToken, "[Bot Token Hidden]");
+    let newString = str.replaceAll(config.DiscordBotToken, config.Language.BotTokenHidden);
     if (config.SteamAPIKey.length > 0) 
-        newString = newString.replaceAll(config.SteamAPIKey, "[Steam API Key Hidden]");
+        newString = newString.replaceAll(config.SteamAPIKey, config.Language.SteamAPIKeyHidden);
     if (webhookData.Webhook.Token.length > 0) 
-        newString = newString.replaceAll(webhookData.Webhook.Token, "[Webhook Token Hidden]");
+        newString = newString.replaceAll(webhookData.Webhook.Token, config.Language.WebhookTokenHidden);
     // Don't need to hide config.ServerIP here since that's publicly known. Anyone who's ever
     // connected to your server already has your ServerIP
     
@@ -444,7 +813,11 @@ client.on('messageCreate', async message => {
         return; // Do nothing for bots
 
     let ranCommand = false;
-    if (config.Managers.includes(message.author.id) && message.content.trimStart().startsWith(config.ManagerCommandPrefix)) {
+    let startsWithPrefix = message.content.trimStart().startsWith(config.ManagerCommandPrefix);
+    let isManager = config.Managers.includes(message.author.id);
+    if (startsWithPrefix && !isManager) {
+        message.react(config.Reactions.NoAccess);
+    } else if (isManager && startsWithPrefix) {
         let inputText = message.content.trimStart().slice(config.ManagerCommandPrefix.length);
         let command = inputText.split(' ', 1)[0].toLowerCase();
         inputText = inputText.slice(command.length).trim();
@@ -530,18 +903,22 @@ client.on('messageCreate', async message => {
 
     if (ranCommand) return;
     if (message.channel.id !== webhookData.ChannelID || message.system) return;
-    if (relaySocket?.readyState !== 1) return message.react('⚠️'); // 1 means open, we can communicate to the server
+    if (relaySocket?.readyState !== 1) {
+        // First check for another connection. If another is open, switch the relaySocket variable
+        // TODO
+        return message.react(config.Reactions.NoConnection); // 1 means open, we can communicate to the server
+    }
 
-    if (message.cleanContent.length > config.MaxMessageLength) return message.react('❌');
+    if (message.cleanContent.length > config.MaxMessageLength) return message.react(config.Reactions.RefuseToSend);
 
     let lines = message.content.split('\n');
-    if (lines.length > config.LineBreakLimit) return message.react('❌');
+    if (lines.length > config.LineBreakLimit) return message.react(config.Reactions.RefuseToSend);
     
     let packet = {};
     packet.type = "message";
     packet.color = message.member.displayHexColor;
     packet.author = message.member.displayName;
-    packet.content = message.cleanContent || "[attachment]";
+    packet.content = message.cleanContent || config.Language.Attachment;
 
     if (message.reference) {
         try {
@@ -576,27 +953,73 @@ client.on('messageCreate', async message => {
     relaySocket.send(Buffer.from(JSON.stringify(packet)));
 });
 
-client.on('interactionCreate', interaction => {
-    if (interaction.isCommand() && interaction.commandName === "status") {
-        if (relaySocket?.readyState !== 1) 
-            return interaction.reply('There is currently no connection to the server. Unable to request status.\nThe server automatically reconnects when an event happens, such as a player joining/leaving, or sending a message on the server.');
+client.on('interactionCreate', async interaction => {
+    if (!interaction.isCommand()) return;
 
-        interaction.reply('Requesting server status...').then(() => {
-            if (relaySocket?.readyState !== 1) return interaction.editReply('Websocket is not connected.');
+    switch (interaction.commandName) {
+        case config.Language.StatusCommandCall: {
+            if (relaySocket?.readyState !== 1) 
+                return interaction.reply(config.Language.NoConnection);
 
-            replyInteraction = interaction;
+            if (replyInteraction || waitingForReply) 
+                return interaction.reply(config.Language.WaitForStatus);
 
-            let packet = {};
-            packet.type = "status";
-            packet.from = interaction.member.displayName;
-            packet.color = interaction.member.displayHexColor;
+            interaction.reply(config.Language.RequestingStatus).then(() => {
+                if (relaySocket?.readyState !== 1) return interaction.editReply(config.Language.NoConnection);
 
-            relaySocket.send(Buffer.from(JSON.stringify(packet)));
+                replyInteraction = interaction;
+                waitingForReply = true;
 
-            statusTimeout = setTimeout(() => {
-                replyInteraction?.editReply("No response received from the server, however it is connected. The server may be hibernating, which occurs when no players are on the server.\nThe server could also not be responding, too much lag may be timing out the server.");
-            }, 5000);
-        });
+                let packet = {};
+                packet.type = "status";
+                packet.from = interaction.member.displayName;
+                packet.color = interaction.member.displayHexColor;
+                packet.timeout = config.StatusTimeoutSeconds;
+
+                relaySocket.send(Buffer.from(JSON.stringify(packet)));
+
+                statusTimeout = setTimeout(() => {
+                    replyInteraction?.editReply(config.Language.NoResponse);
+                    replyInteraction = undefined;
+                    waitingForReply = false;
+                }, config.StatusTimeoutSeconds * 1000);
+            });
+        } break;
+
+        case "top-players":
+        case "player-stats": {
+            if (relaySocket?.readyState === 1) {
+                statsInteraction = interaction;
+                waitingForStats = true;
+                await interaction.reply('Retreiving player stats from the server...');
+
+                let packet = {};
+                packet.type = "plystats";
+                packet.from = interaction.member.displayName;
+                packet.color = interaction.member.displayHexColor;
+                packet.timeout = config.StatusTimeoutSeconds;
+                packet.connectedOnly = interaction.commandName == "player-stats";
+                packet.sort = interaction.options.get('sort').value;
+
+                relaySocket.send(Buffer.from(JSON.stringify(packet)));
+
+                statsTimeout = setTimeout(() => {
+                    statsInteraction?.editReply(config.Language.NoResponse);
+                    statsInteraction = undefined;
+                    waitingForStats = false;
+                }, config.StatusTimeoutSeconds * 1000);
+            } else {
+                if (interaction.commandName == "player-stats")
+                    return interaction.reply(`This command shows the stats of just the connected players. The server is not currently connected to the relay. Please try again later.`);
+
+                if (!existsSync('./playerstats.json'))
+                    return interaction.reply('The server is not connected to the relay. Unable to find a saved stats folder. Please run the command when there is a connection.');
+                
+                let stats = JSON.parse(readFileSync('./playerstats.json'));
+            }
+        } break;
+
+        default: interaction.reply('Unknown command. Who knows how you got here.');
     }
 });
 
@@ -606,8 +1029,36 @@ client.on('ready', () => {
     getWebhook(true);
 
     client.application.commands.set([{
-        name: "status",
-        description: "View how many players are on the server along with the map."
+        name: config.Language.StatusCommandCall,
+        description: config.Language.StatusDescription
+    }, {
+        name: "player-stats",
+        description: "Display the stats of all current players on the server.",
+        options: [{
+            type: 4, // integer
+            name: "sort",
+            description: "What to sort the player list by? Note that K/D Ratio only includes deaths > 10.",
+            required: true,
+            choices: [{
+                name: "Playtime (actual)",
+                value: 0
+            }, {
+                name: "Playtime (AFK)",
+                value: 1
+            }, {
+                name: "Total playtime",
+                value: 2
+            }, {
+                name: "Kills",
+                value: 3
+            }, {
+                name: "Deaths",
+                value: 4
+            }, {
+                name: "K/D Ratio",
+                value: 5
+            }]
+        }]
     }]);
 });
 
@@ -615,10 +1066,11 @@ process.on('unhandledRejection', async (reason, promise) => {
     console.error(reason);
     if (client.isReady() && webhook) {
         await webhook.send({
-            username: "Error Reporting",
-            content: `Unhandled promise rejection:\`\`\`\n${reason.stack}\`\`\``
+            username: config.Language.NameErrorReporting,
+            content: `${config.Language.ErrorUnhandledPromiseRejection}\`\`\`\n${reason.stack}\`\`\``
         });
     }
+    process.exit();
 });
 
 process.on('uncaughtException', (error, origin) => {
@@ -628,5 +1080,7 @@ process.on('uncaughtException', (error, origin) => {
     writeFileSync('./error.txt', error.stack);
     process.exit();
 });
+
+setInterval(pingServer, (config.PingInterval + config.ReplyPingTimeout) * 1000);
 
 client.login(config.DiscordBotToken);
