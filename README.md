@@ -46,7 +46,7 @@ Relays messages sent in Discord to a Garry's Mod server, and vice versa. It work
 # Installation:
 ### Garry's Mod server setup:
 1. [GWSockets](https://github.com/fredyh/gwsockets) - Installation:
-    1. Head to the [Releases](https://github.com/FredyH/GWSockets/releases), and find an appropriate dll file for the operating system your server runs on. I used `GWSockets 1.3.0`
+    1. Head to the [Releases](https://github.com/FredyH/GWSockets/releases), and find an appropriate dll file for the operating system your server runs on. I used [GWSockets 1.3.0](https://github.com/FredyH/GWSockets/releases/tag/1.3.0)
     2. In your server files, navigate to `garrysmod/lua/bin`. The `bin` folder likely doesn't exist, so create it and drop the dll file in there.
 2. Drop `gmod_nubs_discord_chat_relay` into `garrysmod/addons`.
 3. Navigate to `garrysmod/addons/gmod_nubs_discord_chat_relay/lua/ndc_config.lua` and change the `BotIP` and `PortNumber` variables to the IP address and port number of the Discord bot. The port number will have to be the same on both the gmod server and discord bot.
