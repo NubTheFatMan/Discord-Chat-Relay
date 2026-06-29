@@ -27,9 +27,8 @@ exports.SteamAPIKey = "";
 // The lower the number, the more often you will actually be sending requests to Steam, which could get ratelimited and cause issues
 exports.SteamAvatarRefreshTime = 120;
 
-// Should connection requests to your server be logged? If true, every accepted and denied connection
-// request will be appended to connection_log.txt (generated once the server connects for the first time)
-exports.LogConnections = true;
+// Log connections and messages to a file "logs/(year)-(month)-(day).txt", ex "logs/26-06-27.txt"
+exports.Logs = true;
 
 // How many lines should be allowed in a message before the relay decides to not send the message to the server?
 exports.LineBreakLimit = 4;
@@ -238,6 +237,17 @@ exports.Language = {
     // Used for PlayerSpawned. Variables and their replacers:
     //    - $time: The time in minutes:seconds (example 1:02, 0:48)
     TimeTaken: " (took $time)",
+
+    // Used for PlayerSpawned when the player has been on the server before. Variables and their replacers:
+    //    - $timesince: How many hours since they last played, formatted as hours:minutes:seconds. Example: 26:05:15
+    //    - $date: A Discord timestamp formatted as <t:0123456789:F>. Will appear as something like "Sunday, 28 June 2026 22:52"
+    //    - $LastName: The LastName variable listed below, if their name isn't the same as last time
+    // Example: " Last played on $date$LastName." -> " Last played on Sunday, 28 June 2026 22:52 as Nub." OR " Last played on Sunday, 28 June 2026 22:52."
+    LastJoined: " Last played on $date$LastName.",
+
+    // Used for LastJoined when the player has a different name than when they last played. Variables and their replacers:
+    //    - $previousname: Their Steam name the last time they were on the server.
+    LastName: " as $previousname",
 
     // Used when a player leaves to the gmod server.
     // Variables and their replacers:

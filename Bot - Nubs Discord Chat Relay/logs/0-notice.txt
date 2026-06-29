@@ -1,0 +1,1 @@
+This file exists so /logs is uploaded on github. If you do not want logs, disable them in config.js

@@ -4,23 +4,31 @@
 // You may notice I only require the functions I actually use. That's because Discord has made it so you have to specify
 // exactly what you need/are doing with your bot. So I said fuck it and I might as well do that with everything :^) 
 
+let initTimestamp = performance.now();
+console.log("Initializing relay...");
+
 // We need this to read and write the config file, and the connection log
-const { readFileSync, writeFile, appendFile, writeFileSync, existsSync, unlink, lstatSync } = require('fs');
+const { readFileSync, writeFile, appendFileSync, writeFileSync, existsSync, unlink, lstatSync } = require('fs');
+console.log("File system loaded.");
 
 // Allows for the gmod server and the bot to communicate
 // At the time of writing this, I'm running ws version 8.5.0
 const { WebSocketServer } = require('ws');
+console.log("Websocket server manager loaded.");
 
 // Making a bot (duh)
 // At the time of making this, I'm running discord.js version 14.11.0
 const { Client, GatewayIntentBits, User, GuildMember } = require('discord.js'); 
+console.log("Discord.js loaded.");
 
 // We use http.get to get Steam avatars. If you don't want avatars, you can comment this out and not install axios from npm.
 // At the time of making this, I'm running axios version 1.4.0
 const { get } = require('axios');
+console.log("Axios loaded.")
 
 let config = require("./config.js");
 let webhookData = JSON.parse(readFileSync("./ids.json"));
+console.log("-------------------------------\nConfiguration loaded.");
 
 // Constants
 const wss = new WebSocketServer({host: '0.0.0.0', port: config.PortNumber, clientTracking: true}); // We set the host to '0.0.0.0' to tell the server we want to run IPv4 instead of IPv6
@@ -32,6 +40,56 @@ const client = new Client({
         GatewayIntentBits.MessageContent
     ]
 });
+
+function logFilePath() {
+    let now = new Date();
+    let out = [];
+    out.push(now.getFullYear().toString().substring(2)); // year
+
+    let month = (now.getMonth() + 1).toString();
+    if (month.length < 2) month = "0" + month;
+    out.push(month);
+    
+    let day = now.getDate().toString();
+    if (day.length < 2) day = "0" + day;
+    out.push(day);
+    return `./logs/${out.join('-')}.txt`
+}
+
+function logTimestamp() {
+    let now = new Date();
+    let year = now.getFullYear().toString().substring(2);
+
+    let month = (now.getMonth() + 1).toString();
+    if (month.length < 2) month = "0" + month;
+    
+    let day = now.getDate().toString();
+    if (day.length < 2) day = "0" + day;
+    
+    let hour = now.getHours().toString();
+    if (hour.length < 2) hour = "0" + hour;
+
+    let minute = now.getMinutes().toString();
+    if (minute.length < 2) minute = "0" + minute;
+
+    let second = now.getSeconds().toString();
+    if (second.length < 2) second = "0" + second;
+
+    return `[${month}/${day}/${year} @ ${hour}:${minute}:${second}]`
+}
+
+function addLog(content) {
+    let toLog = `${logTimestamp()} ${content}`;
+    console.log(toLog);
+    
+    if (!config.Logs) return;
+
+    try {
+        appendFileSync(logFilePath(), '\n' + toLog);
+    } catch (err) {
+        console.error(err);
+    }
+}
 
 let pingMissed = 0;
 // let pingSent = 0;
@@ -67,15 +125,7 @@ function pingServer() {
 
 // logConnection - Called when someone attempts to connect to the websocket server. Logs it to ./connection_log.txt
 function logConnection(ip, status) {
-    let date = new Date();
-    let timestamp = `[${date.getMonth() + 1}/${date.getDate()}/${date.getFullYear()} @ ${date.getHours()}:${date.getMinutes()}:${date.getSeconds()}]`;
-
-    let message = `\n${timestamp} ${status ? 'Accepting' : 'Denying'} websocket connection request from ${ip}`;
-
-    console.log(message);
-
-    if (config.LogConnections) 
-        appendFile('./connection_log.txt', message, err => {if (err) console.err(err);});
+    addLog(`${status ? 'Accepting' : 'Denying'} websocket connection request from ${ip}`);
 }
 
 // assignWebhook takes a webhook object and stores it for later
@@ -245,6 +295,8 @@ async function sendQueue() {
                     let name = packet.from.replaceAll('```', ''); // Omit code block starters. Discord doesn't allow them in names
                     if (name.length > 32) 
                         name = name.substring(0, 29) + '...';
+                    else if (name.length == 0)
+                        name = "[Invalid Name]"
 
                     let opts = {
                         content: removeFormatting(packet.content.trim()),
@@ -254,6 +306,8 @@ async function sendQueue() {
                     await getSteamAvatar(packet.fromSteamID, packet.from);
                     if (avatarCache[packet.fromSteamID]) 
                         opts.avatarURL = avatarCache[packet.fromSteamID].avatar;
+
+                    addLog(`(gmod) ${name}: ${opts.content}`);
                     
                     await webhook.send(opts);
                 }
@@ -261,6 +315,7 @@ async function sendQueue() {
 
             case "join/leave": {
                 let options = {
+                    content: "Invalid join type",
                     username: config.Language.NamePlayerConnectionStatus
                 }
                 // 1 = join, 2 = spawn, 3 = leave
@@ -346,7 +401,7 @@ async function sendQueue() {
                     } break;
                 }
 
-                options.content = options.content;
+                addLog(`(gmod) ` + options.content);
                 await webhook.send(options);
             } break;
 
@@ -681,6 +736,8 @@ function getWebhook(json) {
     }
 }
 
+console.log("Functions loaded.");
+
 // Websocket server stuff
 let webhook;
 
@@ -714,7 +771,7 @@ wss.on('connection', async ws => {
         try {
             json = JSON.parse(buf.toString());
         } catch(err) {
-            return console.log("Invalid JSON received from server.");
+            return console.log("Invalid JSON received from server.\n" + buf.toString());
         }
 
         if (!webhook) {
@@ -807,10 +864,28 @@ function revertConsoleLog() {
     console.log = normalConsoleLog;
 }
 
+console.log("Websocket server initialized.");
+
 // Discord stuff
 client.on('messageCreate', async message => {
     if (message.author.bot)
         return; // Do nothing for bots
+
+    if (message.content.toLowerCase().startsWith("!status")) {
+        let responses = [
+            "Use /status bozo",
+            "💀",
+            "🖕",
+            "👍",
+            "you got it boss",
+            "massa say i aint got to listen to you",
+            "I'm good",
+            "Server is doing fantastic, thanks for asking.",
+            "Your mother 😂☠️🤣🤪",
+            "The server has flatlined! 😱"
+        ];
+        return message.reply(responses[Math.floor(Math.random() * responses.length)]);
+    }
 
     let ranCommand = false;
     let startsWithPrefix = message.content.trimStart().startsWith(config.ManagerCommandPrefix);
@@ -827,6 +902,7 @@ client.on('messageCreate', async message => {
             case "setgmodchannel": {
                 webhookData.ChannelID = message.channel.id;
                 saveIds();
+                addLog(`(Relay) Relay channel set to ${message.channel.name} by ${message.member.displayName} (${message.author.id}).`);
                 message.react('✅');
             } break;
 
@@ -847,6 +923,7 @@ client.on('messageCreate', async message => {
                     packet.command = inputText;
                     relaySocket.send(Buffer.from(JSON.stringify(packet)));
                     message.react('✅');
+                    addLog(`(gmod <- Discord) ${message.member.displayName} (${message.member.id}) has sent a command to the server console: ${inputText}`);
                 } else {
                     message.react('❌');
                 }
@@ -949,8 +1026,11 @@ client.on('messageCreate', async message => {
             }
         } finally {}
     }
-
     relaySocket.send(Buffer.from(JSON.stringify(packet)));
+
+    let logMessage = `(Discord) ${message.member.displayName} `;
+    if (packet.replyingTo instanceof Object) logMessage += `(replying to ${packet.replyingTo.author}): `;
+    logMessage += packet.content;
 });
 
 client.on('interactionCreate', async interaction => {
@@ -983,6 +1063,8 @@ client.on('interactionCreate', async interaction => {
                     replyInteraction = undefined;
                     waitingForReply = false;
                 }, config.StatusTimeoutSeconds * 1000);
+                
+                addLog(`(Discord) ${interaction.member.displayName} has requested server status.`);
             });
         } break;
 
@@ -1008,6 +1090,7 @@ client.on('interactionCreate', async interaction => {
                     statsInteraction = undefined;
                     waitingForStats = false;
                 }, config.StatusTimeoutSeconds * 1000);
+                addLog(`(Discord) ${packet.from} has requested connected player stats.`);
             } else {
                 if (interaction.commandName == "player-stats")
                     return interaction.reply(`This command shows the stats of just the connected players. The server is not currently connected to the relay. Please try again later.`);
@@ -1024,7 +1107,11 @@ client.on('interactionCreate', async interaction => {
 });
 
 client.on('ready', () => {
-    console.log("Bot initialized");
+    let initTime = performance.now() - initTimestamp;
+    let unit = "ms";
+    if (initTime < 1) {initTime *= 1000; unit = "µs"}
+    console.log(`Bot initialized! Took ${initTime.toFixed(3)} ${unit}`);
+    addLog(`(Relay) Bot started, took ${initTime.toFixed(3)} ${unit}`);
 
     getWebhook(true);
 
@@ -1082,5 +1169,7 @@ process.on('uncaughtException', (error, origin) => {
 });
 
 setInterval(pingServer, (config.PingInterval + config.ReplyPingTimeout) * 1000);
+
+console.log("Discord.js initialized, logging into Discord...");
 
 client.login(config.DiscordBotToken);
